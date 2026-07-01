@@ -1408,12 +1408,18 @@ class SubscriptionController extends Controller
 
         // ── 第2步：事务内更新订阅 + 退差价 ──
         DB::transaction(function () use ($subscription, $forwardRule, $forwardFee, $refundAmount, $remainingDays, $userId) {
+            $wasActive = $forwardRule->status === 'active';
+
             $subscription->update([
                 'purchased_module' => 'static',
                 'has_forward' => false,
             ]);
 
             $forwardRule->update(['status' => 'deleted']);
+
+            if ((float) $forwardFee > 0 && $wasActive) {
+                $subscription->decrement('price', $forwardFee);
+            }
 
             if ($refundAmount > 0) {
                 $customer = $subscription->customer()->lockForUpdate()->first();
