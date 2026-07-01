@@ -1127,33 +1127,22 @@ BASH;
                 ]);
             }
 
-            // Push AP v2 config via remote command (if AP IP is set, and no pending AP command)
+            // Push AP v2 config via remote command (ARP discover AP + sshpass)
             $hasApCommand = RouterRemoteCommand::where('router_device_id', $device->id)
                 ->whereIn('status', ['pending', 'sent'])
                 ->where('command', 'like', '%ap-v2.sh%')
                 ->exists();
-            if ($device->ap_ip && !$hasApCommand) {
+            if (!$hasApCommand) {
                 $apConfig = $device->ap_config ?? [];
                 $apUser = $apConfig['ap_username'] ?? 'root';
-                $apPass = $apConfig['ap_password'] ?? '';
+                $apPass = $apConfig['ap_password'] ?? 'as204921.net';
 
-                $sshPrefix = $apPass
-                    ? sprintf('sshpass -p %s ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 %s@%s',
-                        escapeshellarg($apPass), escapeshellarg($apUser), escapeshellarg($device->ap_ip))
-                    : sprintf('ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 %s@%s',
-                        escapeshellarg($apUser), escapeshellarg($device->ap_ip));
-
-                $apScript = $this->buildApV2Script();
-                $b64 = base64_encode($apScript);
-                $command = sprintf(
-                    'echo %s | base64 -d | %s "cat > /tmp/ap-v2.sh && sh /tmp/ap-v2.sh; rm -f /tmp/ap-v2.sh"',
-                    escapeshellarg($b64), $sshPrefix
-                );
+                $command = $this->buildApV2Command($apUser, $apPass);
 
                 RouterRemoteCommand::create([
                     'router_device_id' => $device->id,
                     'command' => $command,
-                    'timeout' => 120,
+                    'timeout' => 180,
                     'status' => 'pending',
                 ]);
             }
@@ -1169,7 +1158,7 @@ BASH;
                 'message' => 'Auto-migrated to WiFi v2 after agent update',
                 'metadata' => [
                     'accounts_migrated' => $accounts->count(),
-                    'ap_command_queued' => !empty($device->ap_ip),
+                    'ap_command_queued' => true,
                 ],
             ]);
         } catch (\Throwable $e) {
@@ -1220,6 +1209,25 @@ uci commit wireless
 nohup sh -c 'sleep 5 && reboot' >/dev/null 2>&1 &
 echo "V2_MIGRATION_DONE"
 SH;
+    }
+
+    private function buildApV2Command(string $apUser, string $apPass): string
+    {
+        $apScript = $this->buildApV2Script();
+        $b64 = base64_encode($apScript);
+
+        return sprintf(
+            'AP_IP=$(ip neigh show dev eth2 2>/dev/null | grep -v FAILED | awk \'{print $1}\' | grep \'^10\\.20\\.0\\.\' | head -1); '
+            . 'if [ -z "$AP_IP" ]; then for i in $(seq 100 200); do ping -c1 -W1 10.20.0.$i >/dev/null 2>&1 & done; wait; '
+            . 'AP_IP=$(ip neigh show dev eth2 2>/dev/null | grep -v FAILED | awk \'{print $1}\' | grep \'^10\\.20\\.0\\.\' | head -1); fi; '
+            . '[ -z "$AP_IP" ] && echo "ERROR: AP not found on eth2" && exit 1; '
+            . 'echo "Discovered AP at $AP_IP"; '
+            . 'echo %s | base64 -d | sshpass -p %s ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 %s@$AP_IP '
+            . '"cat > /tmp/ap-v2.sh && sh /tmp/ap-v2.sh; rm -f /tmp/ap-v2.sh"',
+            escapeshellarg($b64),
+            escapeshellarg($apPass),
+            escapeshellarg($apUser)
+        );
     }
 
     private function getLatestAgentVersion(): ?string

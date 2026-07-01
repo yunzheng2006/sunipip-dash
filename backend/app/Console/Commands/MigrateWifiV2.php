@@ -87,12 +87,8 @@ class MigrateWifiV2 extends Command
                 $this->info("  Allocated IP ranges for {$migrated} existing account(s)");
             }
 
-            // Step 3: Push AP v2 config via remote command
+            // Step 3: Push AP v2 config via remote command (ARP discovery + sshpass)
             if (!$this->option('skip-ap')) {
-                if (empty($device->ap_ip)) {
-                    $this->warn("  No AP IP — skipping AP config push. Use --skip-ap or set ap_ip first.");
-                    continue;
-                }
                 $this->pushApV2Config($device);
             }
 
@@ -208,41 +204,32 @@ class MigrateWifiV2 extends Command
     {
         $apConfig = $device->ap_config ?? [];
         $apUser = $apConfig['ap_username'] ?? 'root';
-        $apPass = $this->option('ap-password') ?? ($apConfig['ap_password'] ?? '');
-        $apIp = $device->ap_ip;
-
-        if (!empty($apPass)) {
-            $sshPrefix = sprintf(
-                'sshpass -p %s ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 %s@%s',
-                escapeshellarg($apPass),
-                escapeshellarg($apUser),
-                escapeshellarg($apIp)
-            );
-        } else {
-            $sshPrefix = sprintf(
-                'ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 %s@%s',
-                escapeshellarg($apUser),
-                escapeshellarg($apIp)
-            );
-        }
+        $apPass = $this->option('ap-password') ?? ($apConfig['ap_password'] ?? 'as204921.net');
 
         $apScript = $this->buildApV2Script();
         $b64 = base64_encode($apScript);
 
         $command = sprintf(
-            'echo %s | base64 -d | %s "cat > /tmp/ap-v2.sh && sh /tmp/ap-v2.sh; rm -f /tmp/ap-v2.sh"',
+            'AP_IP=$(ip neigh show dev eth2 2>/dev/null | grep -v FAILED | awk \'{print $1}\' | grep \'^10\\.20\\.0\\.\' | head -1); '
+            . 'if [ -z "$AP_IP" ]; then for i in $(seq 100 200); do ping -c1 -W1 10.20.0.$i >/dev/null 2>&1 & done; wait; '
+            . 'AP_IP=$(ip neigh show dev eth2 2>/dev/null | grep -v FAILED | awk \'{print $1}\' | grep \'^10\\.20\\.0\\.\' | head -1); fi; '
+            . '[ -z "$AP_IP" ] && echo "ERROR: AP not found on eth2" && exit 1; '
+            . 'echo "Discovered AP at $AP_IP"; '
+            . 'echo %s | base64 -d | sshpass -p %s ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 %s@$AP_IP '
+            . '"cat > /tmp/ap-v2.sh && sh /tmp/ap-v2.sh; rm -f /tmp/ap-v2.sh"',
             escapeshellarg($b64),
-            $sshPrefix
+            escapeshellarg($apPass),
+            escapeshellarg($apUser)
         );
 
         RouterRemoteCommand::create([
             'router_device_id' => $device->id,
             'command' => $command,
-            'timeout' => 120,
+            'timeout' => 180,
             'status' => 'pending',
         ]);
 
-        $this->info("  AP v2 config command queued → AP {$apIp}");
+        $this->info("  AP v2 config command queued (ARP discovery on eth2)");
     }
 
     private function buildApV2Script(): string
