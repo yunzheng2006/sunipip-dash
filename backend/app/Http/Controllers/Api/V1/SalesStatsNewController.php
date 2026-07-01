@@ -57,7 +57,7 @@ class SalesStatsNewController extends Controller
             $periodEnd = $now->copy()->endOfDay();
         }
 
-        // 预查：balance_deducted=false 但有实际扣款交易的订阅ID
+        // 预查：balance_deducted=false 但有实际扣款交易的订阅ID（含续费）
         $extraDeductedSubIds = DB::table('subscriptions as s')
             ->where('s.balance_deducted', false)
             ->where('s.is_test', false)
@@ -66,7 +66,7 @@ class SalesStatsNewController extends Controller
                   ->from('transactions as t')
                   ->whereColumn('t.related_id', 's.id')
                   ->where('t.related_type', 'like', '%Subscription')
-                  ->whereIn('t.type', ['purchase', 'deduction'])
+                  ->whereIn('t.type', ['purchase', 'deduction', 'renew'])
                   ->where('t.amount', '<', 0);
             })
             ->pluck('s.id')
@@ -311,7 +311,6 @@ class SalesStatsNewController extends Controller
             ->where('transactions.created_at', '<=', $periodEnd)
             ->where('subscriptions.is_test', false)
             ->where(fn($q) => $costSubFilterJoined($q))
-            ->where(fn($q) => $q->where('subscriptions.started_at', '<', $periodStart)->orWhereNull('subscriptions.started_at'))
             ->select(
                 DB::raw("{$costCustExpr} as customer_id"),
                 'subscriptions.id as sub_id',
@@ -347,7 +346,6 @@ class SalesStatsNewController extends Controller
             ->where('transactions.created_at', '<=', $periodEnd)
             ->where('subscriptions.is_test', false)
             ->where(fn($q) => $costSubFilterJoined($q))
-            ->where(fn($q) => $q->where('subscriptions.started_at', '<', $periodStart)->orWhereNull('subscriptions.started_at'))
             ->select(
                 DB::raw("{$costCustExpr} as customer_id"),
                 'subscriptions.id as sub_id',
@@ -489,7 +487,6 @@ class SalesStatsNewController extends Controller
             ->where('transactions.created_at', '<=', $periodEnd)
             ->where('subscriptions.is_test', false)
             ->where(fn($q) => $costSubFilterJoined($q))
-            ->where(fn($q) => $q->where('subscriptions.started_at', '<', $periodStart)->orWhereNull('subscriptions.started_at'))
             ->select(
                 'subscriptions.id', 'subscriptions.customer_id', 'subscriptions.transferred_from_customer_id', 'subscriptions.proxy_ip_id',
                 'subscriptions.hard_cost', 'subscriptions.sales_cost', 'subscriptions.duration', 'subscriptions.unit',
@@ -626,7 +623,6 @@ class SalesStatsNewController extends Controller
             ->where('transactions.created_at', '<=', $periodEnd)
             ->where('subscriptions.is_test', false)
             ->where(fn($q) => $costSubFilterJoined($q))
-            ->where(fn($q) => $q->where('subscriptions.started_at', '<', $periodStart)->orWhereNull('subscriptions.started_at'))
             ->select(
                 DB::raw("{$costCustExpr} as customer_id"),
                 'subscriptions.id as sub_id',
