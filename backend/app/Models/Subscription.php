@@ -16,6 +16,7 @@ class Subscription extends Model
         'is_test', 'test_reclaim_at',
         'has_forward', 'purchased_module', 'status', 'keep_performance', 'renewed_count', 'last_renewed_at',
         'remark', 'customer_remark', 'created_by', 'balance_deducted',
+        'transferred_from_customer_id',
     ];
 
     public function toArray(): array

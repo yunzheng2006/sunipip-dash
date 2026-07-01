@@ -1799,10 +1799,16 @@ class SubscriptionController extends Controller
 
         DB::transaction(function () use ($subscription, $sourceCustomerId, $targetCustomerId, $chargeTarget, $chargeMethod, $refundSource, $price, $userId, $proxyIp, $data) {
             // 1. 转移订阅
-            $subscription->update([
+            $transferUpdate = [
                 'customer_id' => $targetCustomerId,
-                'balance_deducted' => $chargeTarget && $chargeMethod === 'balance',
-            ]);
+            ];
+            if ($chargeTarget) {
+                $transferUpdate['balance_deducted'] = $chargeMethod === 'balance';
+                $transferUpdate['transferred_from_customer_id'] = null;
+            } else {
+                $transferUpdate['transferred_from_customer_id'] = $sourceCustomerId;
+            }
+            $subscription->update($transferUpdate);
 
             // 2. 转移 IP 归属
             if ($proxyIp && $proxyIp->assigned_customer_id === $sourceCustomerId) {

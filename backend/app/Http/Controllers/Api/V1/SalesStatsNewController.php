@@ -105,6 +105,21 @@ class SalesStatsNewController extends Controller
         // 续费月数推算：txn_amount * duration_months / price，但不超过 duration_months（防止降级改价后膨胀）
         $renewMonthsExpr = "LEAST(GREATEST(ROUND(ABS(transactions.amount) * {$monthsExpr} / NULLIF(subscriptions.price, 0)), 1), {$monthsExpr})";
 
+        $costCustExpr = "COALESCE(subscriptions.transferred_from_customer_id, subscriptions.customer_id)";
+        $costCustExprShort = "COALESCE(transferred_from_customer_id, customer_id)";
+        $costCustWhereIn = function ($q, $ids) {
+            $q->where(function ($q2) use ($ids) {
+                $q2->whereIn('subscriptions.customer_id', $ids)
+                   ->orWhereIn('subscriptions.transferred_from_customer_id', $ids);
+            });
+        };
+        $costCustWhereInShort = function ($q, $ids) {
+            $q->where(function ($q2) use ($ids) {
+                $q2->whereIn('customer_id', $ids)
+                   ->orWhereIn('transferred_from_customer_id', $ids);
+            });
+        };
+
         // ── 1. IP数：选定时段内新开或续费的非测试订阅（去重） ──
         // 1a. 新开订阅 ID（仅实际扣款的）
         $newSubIds = DB::table('subscriptions')
@@ -252,13 +267,13 @@ class SalesStatsNewController extends Controller
         // 4a. 新开 IP 成本：sales_cost * 月数
         $newCostData = [];
         $newCostRows = DB::table('subscriptions')
-            ->whereIn('customer_id', $customerIds)
+            ->where(fn($q) => $costCustWhereInShort($q, $customerIds))
             ->where('is_test', false)
             ->where(fn($q) => $costSubFilter($q))
             ->where('started_at', '>=', $periodStart)
             ->where('started_at', '<=', $periodEnd)
-            ->select('customer_id', DB::raw("SUM(COALESCE(sales_cost, 0) * {$initialMonthsExpr}) as ip_cost"))
-            ->groupBy('customer_id')
+            ->select(DB::raw("{$costCustExprShort} as customer_id"), DB::raw("SUM(COALESCE(sales_cost, 0) * {$initialMonthsExpr}) as ip_cost"))
+            ->groupBy(DB::raw($costCustExprShort))
             ->get();
         foreach ($newCostRows as $row) {
             $newCostData[$row->customer_id] = (float) $row->ip_cost;
@@ -269,14 +284,14 @@ class SalesStatsNewController extends Controller
         $newFwdCostRows = DB::table('forward_rules')
             ->join('subscriptions', 'forward_rules.subscription_id', '=', 'subscriptions.id')
             ->leftJoin('forward_plans', 'forward_rules.forward_plan_id', '=', 'forward_plans.id')
-            ->whereIn('subscriptions.customer_id', $customerIds)
+            ->where(fn($q) => $costCustWhereIn($q, $customerIds))
             ->where('subscriptions.is_test', false)
             ->where('forward_rules.status', 'active')
             ->where(fn($q) => $costSubFilterJoined($q))
             ->where('subscriptions.started_at', '>=', $periodStart)
             ->where('subscriptions.started_at', '<=', $periodEnd)
-            ->select('subscriptions.customer_id', DB::raw("SUM(COALESCE(forward_plans.cost_price, 0) * {$initialMonthsExpr}) as fwd_cost"))
-            ->groupBy('subscriptions.customer_id')
+            ->select(DB::raw("{$costCustExpr} as customer_id"), DB::raw("SUM(COALESCE(forward_plans.cost_price, 0) * {$initialMonthsExpr}) as fwd_cost"))
+            ->groupBy(DB::raw($costCustExpr))
             ->get();
         foreach ($newFwdCostRows as $row) {
             $newFwdCostData[$row->customer_id] = (float) $row->fwd_cost;
@@ -298,12 +313,12 @@ class SalesStatsNewController extends Controller
             ->where(fn($q) => $costSubFilterJoined($q))
             ->where(fn($q) => $q->where('subscriptions.started_at', '<', $periodStart)->orWhereNull('subscriptions.started_at'))
             ->select(
-                'subscriptions.customer_id',
+                DB::raw("{$costCustExpr} as customer_id"),
                 'subscriptions.id as sub_id',
                 DB::raw("COALESCE(subscriptions.sales_cost, 0) as sales_cost"),
                 DB::raw("GREATEST(ROUND(SUM(ABS(transactions.amount)) * {$monthsExpr} / NULLIF(subscriptions.price, 0)), 1) as renew_months")
             )
-            ->groupBy('subscriptions.customer_id', 'subscriptions.id', 'subscriptions.sales_cost', 'subscriptions.duration', 'subscriptions.unit', 'subscriptions.price');
+            ->groupBy(DB::raw($costCustExpr), 'subscriptions.id', 'subscriptions.sales_cost', 'subscriptions.duration', 'subscriptions.unit', 'subscriptions.price');
         $renewCostRows = DB::table(DB::raw("({$renewCostSub->toSql()}) as per_sub"))
             ->mergeBindings($renewCostSub)
             ->select('customer_id', DB::raw('SUM(sales_cost * renew_months) as ip_cost'))
@@ -334,12 +349,12 @@ class SalesStatsNewController extends Controller
             ->where(fn($q) => $costSubFilterJoined($q))
             ->where(fn($q) => $q->where('subscriptions.started_at', '<', $periodStart)->orWhereNull('subscriptions.started_at'))
             ->select(
-                'subscriptions.customer_id',
+                DB::raw("{$costCustExpr} as customer_id"),
                 'subscriptions.id as sub_id',
                 DB::raw("COALESCE(forward_plans.cost_price, 0) as fwd_cost_price"),
                 DB::raw("GREATEST(ROUND(SUM(ABS(transactions.amount)) * {$monthsExpr} / NULLIF(subscriptions.price, 0)), 1) as renew_months")
             )
-            ->groupBy('subscriptions.customer_id', 'subscriptions.id', 'forward_plans.cost_price', 'subscriptions.duration', 'subscriptions.unit', 'subscriptions.price');
+            ->groupBy(DB::raw($costCustExpr), 'subscriptions.id', 'forward_plans.cost_price', 'subscriptions.duration', 'subscriptions.unit', 'subscriptions.price');
         $renewFwdCostRows = DB::table(DB::raw("({$renewFwdCostSub->toSql()}) as per_sub"))
             ->mergeBindings($renewFwdCostSub)
             ->select('customer_id', DB::raw('SUM(fwd_cost_price * renew_months) as fwd_cost'))
@@ -354,7 +369,7 @@ class SalesStatsNewController extends Controller
         $upgradeFwdCostRows = DB::table('forward_rules')
             ->join('subscriptions', 'forward_rules.subscription_id', '=', 'subscriptions.id')
             ->leftJoin('forward_plans', 'forward_rules.forward_plan_id', '=', 'forward_plans.id')
-            ->whereIn('subscriptions.customer_id', $customerIds)
+            ->where(fn($q) => $costCustWhereIn($q, $customerIds))
             ->where('subscriptions.is_test', false)
             ->where('forward_rules.status', 'active')
             ->where(fn($q) => $costSubFilterJoined($q))
@@ -362,10 +377,10 @@ class SalesStatsNewController extends Controller
             ->where('forward_rules.created_at', '<=', $periodEnd)
             ->where('subscriptions.started_at', '<', $periodStart)
             ->select(
-                'subscriptions.customer_id',
+                DB::raw("{$costCustExpr} as customer_id"),
                 DB::raw('SUM(COALESCE(forward_plans.cost_price, 0) * GREATEST(DATEDIFF(subscriptions.expires_at, forward_rules.created_at) / 30.0, 0.1)) as fwd_cost')
             )
-            ->groupBy('subscriptions.customer_id')
+            ->groupBy(DB::raw($costCustExpr))
             ->get();
         foreach ($upgradeFwdCostRows as $row) {
             $upgradeFwdCostData[$row->customer_id] = (float) $row->fwd_cost;
@@ -451,12 +466,12 @@ class SalesStatsNewController extends Controller
 
         // 6a. 新开订阅硬成本（仅实际扣款的）
         $newSubs = DB::table('subscriptions')
-            ->whereIn('customer_id', $customerIds)
+            ->where(fn($q) => $costCustWhereInShort($q, $customerIds))
             ->where('is_test', false)
             ->where(fn($q) => $costSubFilter($q))
             ->where('started_at', '>=', $periodStart)
             ->where('started_at', '<=', $periodEnd)
-            ->select('id', 'customer_id', 'proxy_ip_id', 'hard_cost', 'sales_cost', 'duration', 'unit', 'initial_duration', 'initial_unit')
+            ->select('id', 'customer_id', 'transferred_from_customer_id', 'proxy_ip_id', 'hard_cost', 'sales_cost', 'duration', 'unit', 'initial_duration', 'initial_unit')
             ->get();
         $allRelevantSubs = $allRelevantSubs->merge($newSubs);
 
@@ -476,7 +491,7 @@ class SalesStatsNewController extends Controller
             ->where(fn($q) => $costSubFilterJoined($q))
             ->where(fn($q) => $q->where('subscriptions.started_at', '<', $periodStart)->orWhereNull('subscriptions.started_at'))
             ->select(
-                'subscriptions.id', 'subscriptions.customer_id', 'subscriptions.proxy_ip_id',
+                'subscriptions.id', 'subscriptions.customer_id', 'subscriptions.transferred_from_customer_id', 'subscriptions.proxy_ip_id',
                 'subscriptions.hard_cost', 'subscriptions.sales_cost', 'subscriptions.duration', 'subscriptions.unit',
                 'subscriptions.price',
                 DB::raw('ABS(transactions.amount) as txn_amount')
@@ -542,7 +557,8 @@ class SalesStatsNewController extends Controller
         foreach ($newSubs as $sub) {
             $months = max(\App\Support\DurationHelper::toMonths($sub->initial_duration ?: $sub->duration ?: 1, $sub->initial_unit ?: $sub->unit ?: 3), 1);
             $cost = $resolveIpHardCost($sub);
-            $newIpHardCostData[$sub->customer_id] = ($newIpHardCostData[$sub->customer_id] ?? 0) + round($cost * $months, 4);
+            $cid = $sub->transferred_from_customer_id ?: $sub->customer_id;
+            $newIpHardCostData[$cid] = ($newIpHardCostData[$cid] ?? 0) + round($cost * $months, 4);
         }
 
         // 6b 计算：续费 IP 硬成本（先按订阅聚合交易金额再算月数）
@@ -552,7 +568,7 @@ class SalesStatsNewController extends Controller
             $sid = $row->id;
             if (!isset($renewBySubId[$sid])) {
                 $renewBySubId[$sid] = (object) [
-                    'id' => $row->id, 'customer_id' => $row->customer_id,
+                    'id' => $row->id, 'customer_id' => $row->transferred_from_customer_id ?: $row->customer_id,
                     'proxy_ip_id' => $row->proxy_ip_id, 'hard_cost' => $row->hard_cost,
                     'sales_cost' => $row->sales_cost, 'duration' => $row->duration,
                     'unit' => $row->unit, 'price' => $row->price, 'total_txn' => 0,
@@ -579,14 +595,14 @@ class SalesStatsNewController extends Controller
         $newFwdHardCostRows = DB::table('forward_rules')
             ->join('subscriptions', 'forward_rules.subscription_id', '=', 'subscriptions.id')
             ->leftJoin('forward_plans', 'forward_rules.forward_plan_id', '=', 'forward_plans.id')
-            ->whereIn('subscriptions.customer_id', $customerIds)
+            ->where(fn($q) => $costCustWhereIn($q, $customerIds))
             ->where('subscriptions.is_test', false)
             ->where('forward_rules.status', 'active')
             ->where(fn($q) => $costSubFilterJoined($q))
             ->where('subscriptions.started_at', '>=', $periodStart)
             ->where('subscriptions.started_at', '<=', $periodEnd)
-            ->select('subscriptions.customer_id', DB::raw("SUM({$fwdHardExpr} * {$initialMonthsExpr}) as fwd_cost"))
-            ->groupBy('subscriptions.customer_id')
+            ->select(DB::raw("{$costCustExpr} as customer_id"), DB::raw("SUM({$fwdHardExpr} * {$initialMonthsExpr}) as fwd_cost"))
+            ->groupBy(DB::raw($costCustExpr))
             ->get();
         foreach ($newFwdHardCostRows as $row) {
             $newFwdHardCostData[$row->customer_id] = (float) $row->fwd_cost;
@@ -612,12 +628,12 @@ class SalesStatsNewController extends Controller
             ->where(fn($q) => $costSubFilterJoined($q))
             ->where(fn($q) => $q->where('subscriptions.started_at', '<', $periodStart)->orWhereNull('subscriptions.started_at'))
             ->select(
-                'subscriptions.customer_id',
+                DB::raw("{$costCustExpr} as customer_id"),
                 'subscriptions.id as sub_id',
                 DB::raw("{$fwdHardExpr} as fwd_unit_cost"),
                 DB::raw("GREATEST(ROUND(SUM(ABS(transactions.amount)) * {$monthsExpr} / NULLIF(subscriptions.price, 0)), 1) as renew_months")
             )
-            ->groupBy('subscriptions.customer_id', 'subscriptions.id', 'forward_plans.hard_cost_price', 'forward_plans.cost_price', 'subscriptions.duration', 'subscriptions.unit', 'subscriptions.price');
+            ->groupBy(DB::raw($costCustExpr), 'subscriptions.id', 'forward_plans.hard_cost_price', 'forward_plans.cost_price', 'subscriptions.duration', 'subscriptions.unit', 'subscriptions.price');
         $renewFwdHardCostRows = DB::table(DB::raw("({$renewFwdHardCostSub->toSql()}) as per_sub"))
             ->mergeBindings($renewFwdHardCostSub)
             ->select('customer_id', DB::raw('SUM(fwd_unit_cost * renew_months) as fwd_cost'))
@@ -631,7 +647,7 @@ class SalesStatsNewController extends Controller
         $upgradeFwdHardCostRows = DB::table('forward_rules')
             ->join('subscriptions', 'forward_rules.subscription_id', '=', 'subscriptions.id')
             ->leftJoin('forward_plans', 'forward_rules.forward_plan_id', '=', 'forward_plans.id')
-            ->whereIn('subscriptions.customer_id', $customerIds)
+            ->where(fn($q) => $costCustWhereIn($q, $customerIds))
             ->where('subscriptions.is_test', false)
             ->where('forward_rules.status', 'active')
             ->where(fn($q) => $costSubFilterJoined($q))
@@ -639,10 +655,10 @@ class SalesStatsNewController extends Controller
             ->where('forward_rules.created_at', '<=', $periodEnd)
             ->where('subscriptions.started_at', '<', $periodStart)
             ->select(
-                'subscriptions.customer_id',
+                DB::raw("{$costCustExpr} as customer_id"),
                 DB::raw("SUM({$fwdHardExpr} * GREATEST(DATEDIFF(subscriptions.expires_at, forward_rules.created_at) / 30.0, 0.1)) as fwd_cost")
             )
-            ->groupBy('subscriptions.customer_id')
+            ->groupBy(DB::raw($costCustExpr))
             ->get();
         foreach ($upgradeFwdHardCostRows as $row) {
             $upgradeFwdHardCostData[$row->customer_id] = (float) $row->fwd_cost;
