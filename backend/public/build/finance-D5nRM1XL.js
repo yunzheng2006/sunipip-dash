@@ -1,0 +1,1 @@
+import{z as e}from"./index-ChojAsKo.js";function a(){return e.get("/finance/overview")}function r(n=30){return e.get("/finance/trend",{params:{days:n}})}function i(n=20){return e.get("/finance/ranking",{params:{limit:n}})}function s(n){return e.get("/sales-stats",{params:n})}export{r as a,i as b,s as c,a as g};

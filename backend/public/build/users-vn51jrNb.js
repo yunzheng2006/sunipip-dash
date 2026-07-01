@@ -1,0 +1,1 @@
+import{z as s}from"./index-C0KxTAJJ.js";function u(e){return s.get("/users",{params:e})}function n(e){return s.post("/users",e)}function o(e,r){return s.put(`/users/${e}`,r)}function a(e){return s.delete(`/users/${e}`)}function c(e){return s.post(`/users/${e}/reset-password`)}export{n as c,a as d,u as g,c as r,o as u};

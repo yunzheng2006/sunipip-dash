@@ -1,0 +1,1 @@
+import{z as s}from"./index-CkOdL3hc.js";function o(r){return s.get("/spark/products",{params:r})}function n(r){return s.post("/spark/provision",r)}function e(r){return s.get("/spark/orders",{params:r})}function a(r){return s.post(`/spark/sync-order/${r}`)}export{e as a,a as b,o as g,n as s};

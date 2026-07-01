@@ -1,0 +1,7 @@
+{
+    "appName": "杭州百万拳网络科技有限公司",
+    "coin": "5327.0000",
+    "useBridge": 1,
+    "callbackUrl": "https:\/\/admin.sunipip.uk\/api\/v1\/upstream\/yundeng_api\/callback",
+    "status": 1
+}

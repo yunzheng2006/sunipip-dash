@@ -1,0 +1,978 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>太阳IP 数据监控中心</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+::-webkit-scrollbar{width:4px}
+::-webkit-scrollbar-thumb{background:#1a2744;border-radius:2px}
+html,body{height:100%;overflow:hidden;background:#080d1e;color:#e0e6ed;font-family:-apple-system,BlinkMacSystemFont,'PingFang SC','Microsoft YaHei',sans-serif}
+.dashboard{display:grid;grid-template-rows:auto auto 1fr auto;height:100vh;gap:clamp(4px,0.8vh,10px);padding:clamp(6px,0.8vh,12px) clamp(8px,1vw,16px)}
+
+/* Header */
+.header{display:flex;align-items:center;justify-content:space-between;padding:0 8px}
+.header h1{font-size:clamp(16px,1.6vw,22px);font-weight:700;background:linear-gradient(90deg,#00e5ff,#7c4dff);-webkit-background-clip:text;-webkit-text-fill-color:transparent;letter-spacing:2px}
+.header .clock{font-size:clamp(11px,1vw,14px);color:#7b8ca3;font-variant-numeric:tabular-nums}
+.header .mode-toggle{display:flex;gap:0;border:1px solid rgba(0,229,255,.2);border-radius:6px;overflow:hidden}
+.header .mode-btn{padding:4px clamp(8px,0.8vw,14px);font-size:clamp(10px,0.85vw,12px);color:#7b8ca3;background:transparent;border:none;cursor:pointer;transition:all .3s}
+.header .mode-btn.active{background:rgba(0,229,255,.15);color:#00e5ff;font-weight:600}
+.header .mode-btn:hover:not(.active){background:rgba(0,229,255,.06)}
+.header .status{display:flex;align-items:center;gap:6px;font-size:clamp(10px,0.85vw,12px);color:#7b8ca3}
+.header .dot{width:8px;height:8px;border-radius:50%;background:#00e676;animation:pulse 2s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+
+/* Back button */
+.back-btn{position:fixed;top:10px;left:12px;z-index:100;padding:5px 14px;background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.12);border-radius:6px;color:#7b8ca3;font-size:12px;text-decoration:none;transition:all .3s;cursor:pointer}
+.back-btn:hover{background:rgba(0,229,255,.15);color:#00e5ff;border-color:rgba(0,229,255,.3)}
+
+/* KPI Row */
+.kpi-row{display:grid;grid-template-columns:repeat(7,1fr);gap:clamp(4px,0.5vw,10px)}
+.kpi-card{background:linear-gradient(135deg,#0c1427,#101b30);border:1px solid rgba(0,229,255,.08);border-radius:8px;padding:clamp(6px,0.8vh,12px) clamp(8px,0.7vw,14px);position:relative;overflow:hidden;transition:border-color .3s}
+.kpi-card:hover{border-color:rgba(0,229,255,.25)}
+.kpi-card .kpi-value{font-size:clamp(16px,1.8vw,26px);font-weight:700;color:#fff;font-variant-numeric:tabular-nums;line-height:1.2}
+.kpi-card .kpi-label{font-size:clamp(9px,0.75vw,11px);color:#7b8ca3;margin-top:clamp(2px,0.3vh,4px)}
+.kpi-card .kpi-today{position:absolute;top:8px;right:10px;font-size:clamp(9px,0.75vw,11px);color:#00e676;font-weight:500}
+.kpi-card::after{content:'';position:absolute;top:0;left:0;right:0;height:2px}
+.kpi-card:nth-child(1)::after{background:#00e5ff}
+.kpi-card:nth-child(2)::after{background:#00e676}
+.kpi-card:nth-child(3)::after{background:#448aff}
+.kpi-card:nth-child(4)::after{background:#7c4dff}
+.kpi-card:nth-child(5)::after{background:#ffc107}
+.kpi-card:nth-child(6)::after{background:#ff9800}
+.kpi-card:nth-child(7)::after{background:#ff5252}
+
+/* Main Area */
+.main-area{display:grid;grid-template-columns:16% 1fr 18%;gap:clamp(4px,0.5vw,10px);min-height:0}
+.panel{background:linear-gradient(135deg,#0c1427,#0e1830);border:1px solid rgba(0,229,255,.06);border-radius:8px;display:flex;flex-direction:column;overflow:hidden}
+.panel-title{font-size:clamp(11px,0.9vw,13px);font-weight:600;color:#a0aec0;padding:clamp(6px,0.7vh,10px) clamp(8px,0.8vw,14px) 0;display:flex;align-items:center;gap:6px}
+.panel-title::before{content:'';width:3px;height:clamp(10px,1.2vh,14px);background:#00e5ff;border-radius:2px}
+.panel-body{flex:1;min-height:0;padding:clamp(3px,0.4vh,6px)}
+
+/* Left Column */
+.left-col{display:flex;flex-direction:column;gap:clamp(4px,0.5vw,10px)}
+.funnel-list{padding:clamp(4px,0.6vh,8px) clamp(8px,0.8vw,14px)}
+.funnel-item{display:flex;align-items:center;gap:clamp(4px,0.5vw,10px);padding:clamp(3px,0.4vh,6px) 0;border-bottom:1px solid rgba(255,255,255,.04)}
+.funnel-item:last-child{border:none}
+.funnel-item .f-label{font-size:clamp(10px,0.85vw,12px);color:#7b8ca3;width:clamp(50px,5.5vw,80px);flex-shrink:0}
+.funnel-item .f-bar{flex:1;height:clamp(4px,0.5vh,6px);background:#131d35;border-radius:3px;overflow:hidden}
+.funnel-item .f-bar-inner{height:100%;border-radius:3px;transition:width .8s ease}
+.funnel-item .f-value{font-size:clamp(11px,0.9vw,13px);font-weight:600;color:#e0e6ed;width:clamp(40px,4vw,60px);text-align:right;font-variant-numeric:tabular-nums}
+
+/* Center Column */
+.center-col{display:flex;flex-direction:column;gap:clamp(4px,0.5vw,10px)}
+.map-panel{flex:2}
+.map-legend{display:flex;justify-content:center;gap:clamp(10px,1.2vw,20px);padding:2px 0 clamp(3px,0.4vh,6px)}
+.map-legend span{font-size:clamp(9px,0.75vw,11px);color:#7b8ca3;display:flex;align-items:center;gap:4px}
+.map-legend i{width:clamp(6px,0.5vw,8px);height:clamp(6px,0.5vw,8px);border-radius:50%;display:inline-block}
+.map-legend .lg-visitor{background:#00e5ff;box-shadow:0 0 6px #00e5ff}
+.map-legend .lg-customer{background:#ffc107;box-shadow:0 0 6px #ffc107}
+
+/* Right Column */
+.right-col{display:flex;flex-direction:column;gap:clamp(4px,0.5vw,10px)}
+.product-grid{display:grid;grid-template-columns:1fr 1fr;gap:clamp(4px,0.4vw,8px);padding:clamp(4px,0.5vh,8px) clamp(6px,0.6vw,10px)}
+.prod-card{background:#0a1020;border:1px solid rgba(0,229,255,.06);border-radius:6px;padding:clamp(6px,0.7vh,10px) clamp(6px,0.6vw,12px);text-align:center}
+.prod-card .prod-value{font-size:clamp(16px,1.5vw,22px);font-weight:700;font-variant-numeric:tabular-nums}
+.prod-card .prod-label{font-size:clamp(9px,0.75vw,11px);color:#7b8ca3;margin-top:2px}
+.prod-card:nth-child(1) .prod-value{color:#00e5ff}
+.prod-card:nth-child(2) .prod-value{color:#448aff}
+.prod-card:nth-child(3) .prod-value{color:#7c4dff}
+.prod-card:nth-child(4) .prod-value{color:#e040fb}
+
+/* CRM mini bar */
+.crm-row{display:flex;gap:clamp(3px,0.3vw,6px);padding:clamp(2px,0.3vh,4px) clamp(6px,0.6vw,10px) clamp(4px,0.5vh,8px)}
+.crm-badge{flex:1;background:#0a1020;border-radius:4px;padding:clamp(4px,0.4vh,6px) clamp(4px,0.4vw,8px);text-align:center}
+.crm-badge .crm-val{font-size:clamp(13px,1.1vw,16px);font-weight:700;color:#ffc107;font-variant-numeric:tabular-nums}
+.crm-badge .crm-lbl{font-size:clamp(8px,0.65vw,10px);color:#7b8ca3}
+
+/* Bottom Area */
+.bottom-area{display:grid;grid-template-columns:1fr 1fr 1fr;gap:clamp(4px,0.5vw,10px)}
+
+/* Auth Dialog */
+.auth-overlay{position:fixed;inset:0;background:rgba(0,0,0,.85);display:flex;align-items:center;justify-content:center;z-index:1000}
+.auth-box{background:#0f1629;border:1px solid #1a2744;border-radius:12px;padding:32px;width:360px;text-align:center}
+.auth-box h2{font-size:18px;margin-bottom:8px;color:#e0e6ed}
+.auth-box p{font-size:12px;color:#7b8ca3;margin-bottom:20px}
+.auth-box input{width:100%;padding:10px 14px;background:#080d1e;border:1px solid #1a2744;border-radius:6px;color:#e0e6ed;font-size:14px;outline:none;margin-bottom:12px}
+.auth-box input:focus{border-color:#00e5ff}
+.auth-box button{width:100%;padding:10px;background:linear-gradient(135deg,#00e5ff,#0052d4);border:none;border-radius:6px;color:#fff;font-size:14px;font-weight:600;cursor:pointer}
+.auth-box .auth-err{color:#ff5252;font-size:12px;margin-top:8px;display:none}
+
+/* Loading */
+.loading-overlay{position:fixed;inset:0;background:#080d1e;display:flex;flex-direction:column;align-items:center;justify-content:center;z-index:999}
+.loading-overlay .spinner{width:40px;height:40px;border:3px solid #1a2744;border-top-color:#00e5ff;border-radius:50%;animation:spin .8s linear infinite}
+.loading-overlay p{margin-top:12px;color:#7b8ca3;font-size:13px}
+@keyframes spin{to{transform:rotate(360deg)}}
+
+/* Error toast */
+.toast{position:fixed;top:20px;right:20px;background:#1a2744;border:1px solid #ff5252;border-radius:6px;padding:10px 16px;font-size:12px;color:#ff5252;z-index:2000;display:none;animation:fadeIn .3s}
+@keyframes fadeIn{from{opacity:0;transform:translateY(-10px)}to{opacity:1;transform:none}}
+
+/* ===== Animated Background Grid ===== */
+.bg-grid{position:fixed;inset:0;z-index:-1;overflow:hidden;pointer-events:none}
+.bg-grid::before{content:'';position:absolute;inset:-50%;background:
+  linear-gradient(rgba(0,229,255,.03) 1px,transparent 1px),
+  linear-gradient(90deg,rgba(0,229,255,.03) 1px,transparent 1px);
+  background-size:60px 60px;animation:gridMove 20s linear infinite}
+@keyframes gridMove{to{transform:translate(60px,60px)}}
+
+/* Floating particles */
+.particle{position:fixed;border-radius:50%;pointer-events:none;z-index:-1;opacity:0;animation:particleFloat linear infinite}
+@keyframes particleFloat{
+  0%{opacity:0;transform:translateY(100vh) scale(0)}
+  10%{opacity:1}
+  90%{opacity:1}
+  100%{opacity:0;transform:translateY(-10vh) scale(1)}
+}
+
+/* ===== Panel Glow Border ===== */
+.panel{position:relative}
+.panel::before{content:'';position:absolute;inset:-1px;border-radius:9px;padding:1px;
+  background:linear-gradient(135deg,rgba(0,229,255,.15),transparent 40%,transparent 60%,rgba(124,77,255,.15));
+  -webkit-mask:linear-gradient(#fff 0 0) content-box,linear-gradient(#fff 0 0);
+  -webkit-mask-composite:xor;mask-composite:exclude;
+  opacity:0;transition:opacity .5s;pointer-events:none;z-index:1}
+.panel:hover::before{opacity:1}
+
+/* ===== Map Container ===== */
+.map-container{position:relative;overflow:hidden}
+.map-container #chartMap{position:absolute;inset:0}
+
+/* ===== Map Scan Line ===== */
+.map-container::after{
+  content:'';position:absolute;top:0;left:0;right:0;height:2px;
+  background:linear-gradient(90deg,transparent,rgba(0,229,255,.6),transparent);
+  animation:scanLine 4s ease-in-out infinite;z-index:5;pointer-events:none}
+@keyframes scanLine{
+  0%{top:0;opacity:0}
+  10%{opacity:1}
+  90%{opacity:1}
+  100%{top:100%;opacity:0}
+}
+
+/* ===== Map Radar Sweep ===== */
+.map-radar{position:absolute;top:50%;left:50%;width:min(300px,35vw);height:min(300px,35vw);transform:translate(-50%,-50%);
+  border-radius:50%;pointer-events:none;z-index:3;opacity:.15}
+.map-radar::before{content:'';position:absolute;inset:0;border-radius:50%;
+  background:conic-gradient(from 0deg,transparent 0deg,rgba(0,229,255,.4) 30deg,transparent 60deg);
+  animation:radarSweep 6s linear infinite}
+@keyframes radarSweep{to{transform:rotate(360deg)}}
+
+/* ===== KPI Card Shimmer ===== */
+.kpi-card{overflow:hidden}
+.kpi-card::before{content:'';position:absolute;top:-50%;left:-50%;width:200%;height:200%;
+  background:linear-gradient(135deg,transparent 40%,rgba(0,229,255,.04) 50%,transparent 60%);
+  animation:kpiShimmer 6s ease-in-out infinite;pointer-events:none}
+@keyframes kpiShimmer{
+  0%,100%{transform:translate(-30%,-30%) rotate(0deg)}
+  50%{transform:translate(30%,30%) rotate(10deg)}
+}
+
+/* ===== Header Title Glow ===== */
+.header h1{text-shadow:0 0 20px rgba(0,229,255,.3);animation:titleGlow 3s ease-in-out infinite alternate}
+@keyframes titleGlow{
+  from{text-shadow:0 0 20px rgba(0,229,255,.2),0 0 40px rgba(0,229,255,.1)}
+  to{text-shadow:0 0 30px rgba(0,229,255,.4),0 0 60px rgba(0,229,255,.15)}
+}
+
+/* ===== Panel Entrance ===== */
+.panel{animation:panelIn .6s ease-out backwards}
+.left-col .panel:nth-child(1){animation-delay:.1s}
+.left-col .panel:nth-child(2){animation-delay:.2s}
+.center-col .panel:nth-child(1){animation-delay:.15s}
+.center-col .panel:nth-child(2){animation-delay:.25s}
+.right-col .panel:nth-child(1){animation-delay:.2s}
+.right-col .panel:nth-child(2){animation-delay:.3s}
+.bottom-area .panel:nth-child(1){animation-delay:.35s}
+.bottom-area .panel:nth-child(2){animation-delay:.4s}
+.bottom-area .panel:nth-child(3){animation-delay:.45s}
+@keyframes panelIn{from{opacity:0;transform:translateY(20px)}to{opacity:1;transform:none}}
+
+/* ===== KPI Row Entrance ===== */
+.kpi-card{animation:kpiIn .5s ease-out backwards}
+.kpi-card:nth-child(1){animation-delay:.05s}
+.kpi-card:nth-child(2){animation-delay:.1s}
+.kpi-card:nth-child(3){animation-delay:.15s}
+.kpi-card:nth-child(4){animation-delay:.2s}
+.kpi-card:nth-child(5){animation-delay:.25s}
+.kpi-card:nth-child(6){animation-delay:.3s}
+.kpi-card:nth-child(7){animation-delay:.35s}
+@keyframes kpiIn{from{opacity:0;transform:translateY(-15px) scale(.95)}to{opacity:1;transform:none}}
+
+/* ===== Data Refresh Pulse ===== */
+.refresh-pulse{animation:refreshPulse .8s ease-out}
+@keyframes refreshPulse{
+  0%{box-shadow:inset 0 0 0 1px rgba(0,229,255,.3)}
+  100%{box-shadow:inset 0 0 0 1px transparent}
+}
+
+/* ===== Mode Toggle Glow ===== */
+.mode-btn.active{box-shadow:0 0 12px rgba(0,229,255,.2)}
+
+/* ===== Status Dot Enhanced ===== */
+.header .dot{box-shadow:0 0 8px rgba(0,230,118,.5),0 0 16px rgba(0,230,118,.2)}
+
+/* ===== Responsive Breakpoints ===== */
+@media (max-height:750px){
+  .main-area{grid-template-columns:14% 1fr 16%}
+  .kpi-row{gap:clamp(2px,0.4vw,6px)}
+  .map-legend{padding:1px 0 2px}
+}
+@media (max-width:1280px){
+  .main-area{grid-template-columns:15% 1fr 17%}
+}
+@media (max-width:1024px){
+  .main-area{grid-template-columns:14% 1fr 16%}
+  .kpi-row{grid-template-columns:repeat(7,1fr)}
+}
+</style>
+</head>
+<body>
+
+<!-- Animated Background -->
+<div class="bg-grid"></div>
+
+<!-- Back to admin button (shown only when logged in via admin) -->
+<a id="backBtn" class="back-btn" href="/dashboard" style="display:none">&larr; 返回管理后台</a>
+
+<!-- Auth Dialog -->
+<div id="authOverlay" class="auth-overlay" style="display:none">
+  <div class="auth-box">
+    <h2>数据监控中心</h2>
+    <p>请输入 API 密钥以访问看板数据</p>
+    <input id="authInput" type="text" placeholder="输入 API Key..." autocomplete="off">
+    <button onclick="submitAuth()">进入看板</button>
+    <div id="authErr" class="auth-err"></div>
+  </div>
+</div>
+
+<!-- Loading -->
+<div id="loadingOverlay" class="loading-overlay">
+  <div class="spinner"></div>
+  <p>正在加载数据...</p>
+</div>
+
+<!-- Toast -->
+<div id="toast" class="toast"></div>
+
+<!-- Dashboard -->
+<div id="dashboard" class="dashboard" style="display:none">
+  <!-- Header -->
+  <div class="header">
+    <h1>太阳IP 数据监控中心</h1>
+    <div class="mode-toggle">
+      <button class="mode-btn active" data-mode="total" onclick="switchMode('total')">累计</button>
+      <button class="mode-btn" data-mode="today" onclick="switchMode('today')">今日</button>
+    </div>
+    <div class="status"><span class="dot"></span><span id="statusText">实时监控中</span></div>
+    <div class="clock" id="clock"></div>
+  </div>
+
+  <!-- KPI Row -->
+  <div class="kpi-row">
+    <div class="kpi-card"><div class="kpi-value" id="kpi-visits">-</div><div class="kpi-label">官网访问总量</div><div class="kpi-today" id="kpi-visits-today"></div></div>
+    <div class="kpi-card"><div class="kpi-value" id="kpi-online">-</div><div class="kpi-label">当前在线</div><div class="kpi-today" id="kpi-online-detail"></div></div>
+    <div class="kpi-card"><div class="kpi-value" id="kpi-reg">-</div><div class="kpi-label">注册总量</div><div class="kpi-today" id="kpi-reg-today"></div></div>
+    <div class="kpi-card"><div class="kpi-value" id="kpi-verified">-</div><div class="kpi-label">实名认证</div><div class="kpi-today" id="kpi-verified-today"></div></div>
+    <div class="kpi-card"><div class="kpi-value" id="kpi-purchased">-</div><div class="kpi-label">已购买用户</div><div class="kpi-today" id="kpi-purchased-today"></div></div>
+    <div class="kpi-card"><div class="kpi-value" id="kpi-nopurchase">-</div><div class="kpi-label">注册未购买</div><div class="kpi-today" id="kpi-unreg"></div></div>
+    <div class="kpi-card"><div class="kpi-value" id="kpi-churned">-</div><div class="kpi-label">3月未复购</div><div class="kpi-today" id="kpi-churned-pct"></div></div>
+  </div>
+
+  <!-- Main Area -->
+  <div class="main-area">
+    <!-- Left Column -->
+    <div class="left-col">
+      <div class="panel" style="flex:1">
+        <div class="panel-title">价格分布</div>
+        <div class="panel-body" id="chartPricing"></div>
+      </div>
+      <div class="panel" style="flex:1">
+        <div class="panel-title" id="funnelTitle">用户转化漏斗</div>
+        <div class="funnel-list" id="funnelList">
+          <div class="funnel-item"><span class="f-label">访问用户</span><div class="f-bar"><div class="f-bar-inner" style="width:0;background:#00e5ff"></div></div><span class="f-value" id="fn-visit">0</span></div>
+          <div class="funnel-item"><span class="f-label">注册用户</span><div class="f-bar"><div class="f-bar-inner" style="width:0;background:#448aff"></div></div><span class="f-value" id="fn-reg">0</span></div>
+          <div class="funnel-item"><span class="f-label">实名认证</span><div class="f-bar"><div class="f-bar-inner" style="width:0;background:#7c4dff"></div></div><span class="f-value" id="fn-verified">0</span></div>
+          <div class="funnel-item"><span class="f-label">已购买</span><div class="f-bar"><div class="f-bar-inner" style="width:0;background:#ffc107"></div></div><span class="f-value" id="fn-purchased">0</span></div>
+          <div class="funnel-item"><span class="f-label">消费>10万</span><div class="f-bar"><div class="f-bar-inner" style="width:0;background:#ff9800"></div></div><span class="f-value" id="fn-crm10">0</span></div>
+          <div class="funnel-item"><span class="f-label">消费>50万</span><div class="f-bar"><div class="f-bar-inner" style="width:0;background:#ff5252"></div></div><span class="f-value" id="fn-crm50">0</span></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Center Column -->
+    <div class="center-col">
+      <div class="panel map-panel">
+        <div class="panel-title">全国实时数据地图</div>
+        <div class="map-legend">
+          <span><i class="lg-visitor"></i>实时访客</span>
+          <span><i class="lg-customer"></i>客户分布</span>
+        </div>
+        <div class="panel-body map-container">
+          <div id="chartMap"></div>
+          <div class="map-radar"></div>
+        </div>
+      </div>
+      <div class="panel" style="flex:0 0 auto;height:clamp(80px,13vh,140px)">
+        <div class="panel-title">24小时在线趋势</div>
+        <div class="panel-body" id="chartHourly"></div>
+      </div>
+    </div>
+
+    <!-- Right Column -->
+    <div class="right-col">
+      <div class="panel" style="flex:0 0 auto">
+        <div class="panel-title" id="prodTitle">在线产品数据</div>
+        <div class="product-grid">
+          <div class="prod-card"><div class="prod-value" id="prod-total">-</div><div class="prod-label">IP总量</div></div>
+          <div class="prod-card"><div class="prod-value" id="prod-single">-</div><div class="prod-label">单IP</div></div>
+          <div class="prod-card"><div class="prod-value" id="prod-video">-</div><div class="prod-label">视频专线</div></div>
+          <div class="prod-card"><div class="prod-value" id="prod-live">-</div><div class="prod-label">直播专线</div></div>
+        </div>
+        <div class="crm-row">
+          <div class="crm-badge"><div class="crm-val" id="crm-expired">-</div><div class="crm-lbl" id="crm-expired-lbl">过期IP</div></div>
+          <div class="crm-badge"><div class="crm-val" id="crm-refunded">-</div><div class="crm-lbl" id="crm-refunded-lbl">退款IP</div></div>
+          <div class="crm-badge"><div class="crm-val" id="crm-renewed">-</div><div class="crm-lbl" id="crm-renewed-lbl">续费3月+</div></div>
+        </div>
+      </div>
+      <div class="panel" style="flex:1">
+        <div class="panel-title">地区IP在线排行</div>
+        <div class="panel-body" id="chartRegion"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Bottom Area -->
+  <div class="bottom-area">
+    <div class="panel">
+      <div class="panel-title" id="salesTitle">销售业绩排行</div>
+      <div class="panel-body" id="chartSales"></div>
+    </div>
+    <div class="panel">
+      <div class="panel-title">7日收入趋势</div>
+      <div class="panel-body" id="chartFinance"></div>
+    </div>
+    <div class="panel">
+      <div class="panel-title" id="finTitle">今日财务概览</div>
+      <div class="panel-body" style="display:flex;flex-direction:column;justify-content:center;padding:clamp(8px,1vh,12px) clamp(10px,1vw,18px)">
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:clamp(6px,0.6vw,10px)">
+          <div class="prod-card"><div class="prod-value" id="fin-today-rev" style="color:#00e676">-</div><div class="prod-label">今日收入</div></div>
+          <div class="prod-card"><div class="prod-value" id="fin-today-topup" style="color:#00e5ff">-</div><div class="prod-label">今日充值</div></div>
+          <div class="prod-card"><div class="prod-value" id="fin-today-refund" style="color:#ff5252">-</div><div class="prod-label">今日退款</div></div>
+          <div class="prod-card" id="finMonthCard"><div class="prod-value" id="fin-month-rev" style="color:#ffc107">-</div><div class="prod-label">本月收入</div></div>
+        </div>
+        <div id="finTotalRow" style="text-align:center;margin-top:clamp(6px,0.7vh,10px);font-size:clamp(10px,0.85vw,12px);color:#4a5568">
+          累计总收入 <span id="fin-total-rev" style="color:#ffc107;font-size:clamp(13px,1.1vw,16px);font-weight:700">-</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script src="js/charts.lib.js"></script>
+<script>
+// ========== CONFIG ==========
+const CONFIG = {
+  apiBase: 'https://api-all.sunipip.com',
+  endpoint: '/api/v1/bigdata/dashboard',
+  refreshMs: 30000,
+};
+
+const PROVINCE_COORDS = {
+  '北京':[116.46,39.92],'天津':[117.19,39.13],'河北':[114.48,38.03],'山西':[112.53,37.87],
+  '内蒙古':[111.65,40.82],'辽宁':[123.38,41.8],'吉林':[125.35,43.88],'黑龙江':[126.63,45.75],
+  '上海':[121.47,31.23],'江苏':[118.78,32.04],'浙江':[120.19,30.26],'安徽':[117.27,31.86],
+  '福建':[119.3,26.08],'江西':[115.89,28.68],'山东':[117,36.65],'河南':[113.65,34.76],
+  '湖北':[114.31,30.52],'湖南':[112.98,28.19],'广东':[113.23,23.16],'广西':[108.33,22.84],
+  '海南':[110.35,20.02],'重庆':[106.54,29.59],'四川':[104.06,30.67],'贵州':[106.71,26.57],
+  '云南':[102.73,25.04],'西藏':[91.11,29.97],'陕西':[108.95,34.27],'甘肃':[103.73,36.03],
+  '青海':[101.74,36.56],'宁夏':[106.27,38.47],'新疆':[87.68,43.77],'台湾':[121.51,25.05],
+  '香港':[114.17,22.28],'澳门':[113.54,22.19],
+};
+
+// ========== STATE ==========
+let charts = {};
+let chinaMapLoaded = false;
+let refreshTimer = null;
+let lastData = null;
+let currentMode = 'total';
+
+function switchMode(mode) {
+  currentMode = mode;
+  document.querySelectorAll('.mode-btn').forEach(b => {
+    b.classList.toggle('active', b.dataset.mode === mode);
+  });
+  if (lastData) updateDashboard(lastData);
+}
+
+// ========== AUTH ==========
+function getSanctumToken() {
+  return localStorage.getItem('sunipip_token') || '';
+}
+
+function getApiKey() {
+  const params = new URLSearchParams(location.search);
+  return params.get('key') || localStorage.getItem('bigdata_key') || '';
+}
+
+function hasAuth() {
+  return !!(getSanctumToken() || getApiKey());
+}
+
+function submitAuth() {
+  const key = document.getElementById('authInput').value.trim();
+  if (!key) return;
+  localStorage.setItem('bigdata_key', key);
+  document.getElementById('authOverlay').style.display = 'none';
+  init();
+}
+
+document.getElementById('authInput')?.addEventListener('keydown', e => {
+  if (e.key === 'Enter') submitAuth();
+});
+
+function showAuth(msg) {
+  document.getElementById('loadingOverlay').style.display = 'none';
+  document.getElementById('authOverlay').style.display = 'flex';
+  if (msg) {
+    const err = document.getElementById('authErr');
+    err.textContent = msg;
+    err.style.display = 'block';
+  }
+}
+
+// ========== DATA FETCH ==========
+async function fetchData() {
+  const token = getSanctumToken();
+  const key = getApiKey();
+  const headers = { 'Accept': 'application/json' };
+  let url = CONFIG.apiBase + CONFIG.endpoint;
+
+  if (token) {
+    headers['Authorization'] = 'Bearer ' + token;
+  } else if (key) {
+    url += '?key=' + encodeURIComponent(key);
+  }
+
+  try {
+    const resp = await fetch(url, { headers });
+    if (resp.status === 401) {
+      if (token) {
+        showToast('登录已过期，请重新登录');
+        setTimeout(() => { window.location.href = '/login'; }, 1500);
+        return null;
+      }
+      showAuth('密钥无效，请重新输入');
+      return null;
+    }
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    const json = await resp.json();
+    return json.data || json;
+  } catch (e) {
+    showToast('数据加载失败: ' + e.message);
+    return null;
+  }
+}
+
+// ========== TOAST ==========
+function showToast(msg) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.style.display = 'block';
+  setTimeout(() => t.style.display = 'none', 4000);
+}
+
+// ========== CLOCK ==========
+function updateClock() {
+  const d = new Date();
+  const pad = n => String(n).padStart(2, '0');
+  document.getElementById('clock').textContent =
+    d.getFullYear() + '-' + pad(d.getMonth()+1) + '-' + pad(d.getDate()) + ' ' +
+    pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds());
+}
+
+// ========== NUMBER ANIMATION ==========
+function animateNum(el, target, duration) {
+  if (!el) return;
+  duration = duration || 800;
+  const start = parseInt(el.textContent.replace(/[^0-9]/g, '')) || 0;
+  if (start === target) { el.textContent = formatNum(target); return; }
+  const diff = target - start;
+  const startTime = performance.now();
+  function tick(now) {
+    const progress = Math.min((now - startTime) / duration, 1);
+    const eased = 1 - Math.pow(1 - progress, 3);
+    el.textContent = formatNum(Math.round(start + diff * eased));
+    if (progress < 1) requestAnimationFrame(tick);
+  }
+  requestAnimationFrame(tick);
+}
+
+function formatNum(n) {
+  if (n === null || n === undefined || isNaN(n)) return '-';
+  return n.toLocaleString('en-US');
+}
+
+function formatMoney(n) {
+  if (n >= 10000) return (n / 10000).toFixed(1) + '万';
+  return formatNum(Math.round(n));
+}
+
+// ========== CHART HELPERS ==========
+function safeChart(id) {
+  if (charts[id]) return charts[id];
+  const dom = document.getElementById(id);
+  if (!dom) return null;
+  charts[id] = echarts.init(dom, null, { renderer: 'canvas' });
+  return charts[id];
+}
+
+function getMapZoom() {
+  const dom = document.getElementById('chartMap');
+  if (!dom || dom.offsetWidth === 0 || dom.offsetHeight === 0) return 1.2;
+  const h = dom.offsetHeight;
+  return Math.max(0.95, Math.min(1.4, 0.7 + h / 800));
+}
+
+// ========== INIT CHARTS ==========
+function initCharts() {
+  if (chinaMapLoaded) {
+    const mapChart = safeChart('chartMap');
+    mapChart && mapChart.setOption({
+      geo: {
+        map: 'china', roam: false,
+        itemStyle: { areaColor: '#0c2135', borderColor: '#1a3a5c', borderWidth: 0.6 },
+        emphasis: { itemStyle: { areaColor: '#0f2d4d', borderColor: '#00e5ff', borderWidth: 1 }, label: { show: true, color: '#00e5ff', fontSize: 10 } },
+        label: { show: false },
+        zoom: getMapZoom(), top: '3%', bottom: '3%',
+        regions: [{ name: '南海诸岛', itemStyle: { opacity: 0 }, label: { show: false } }],
+      },
+      tooltip: { trigger: 'item', backgroundColor: 'rgba(15,22,41,.95)', borderColor: '#1a2744', textStyle: { color: '#e0e6ed', fontSize: 12 }, extraCssText: 'backdrop-filter:blur(8px)' },
+      series: []
+    });
+  }
+
+  const pricingChart = safeChart('chartPricing');
+  pricingChart && pricingChart.setOption({
+    tooltip: { trigger: 'item', formatter: '{b}: {c} ({d}%)', backgroundColor: '#0f1629', borderColor: '#1a2744', textStyle: { color: '#e0e6ed', fontSize: 12 } },
+    legend: { orient: 'vertical', right: 8, top: 'center', textStyle: { color: '#7b8ca3', fontSize: 10 }, itemWidth: 10, itemHeight: 10 },
+    series: [{ type: 'pie', radius: ['40%', '65%'], center: ['35%', '50%'], label: { show: false }, data: [], itemStyle: { borderColor: '#0c1427', borderWidth: 2 } }]
+  });
+
+  const hourlyChart = safeChart('chartHourly');
+  hourlyChart && hourlyChart.setOption({
+    tooltip: { trigger: 'axis', backgroundColor: '#0f1629', borderColor: '#1a2744', textStyle: { color: '#e0e6ed', fontSize: 12 } },
+    grid: { left: 40, right: 16, top: 10, bottom: 24 },
+    xAxis: { type: 'category', data: Array.from({length:24}, (_,i) => String(i).padStart(2,'0')+':00'),
+      axisLine: { lineStyle: { color: '#1a2744' } }, axisLabel: { color: '#4a5568', fontSize: 10, interval: 3 }, axisTick: { show: false } },
+    yAxis: { type: 'value', splitLine: { lineStyle: { color: '#111d33' } }, axisLabel: { color: '#4a5568', fontSize: 10 } },
+    series: [{ type: 'line', smooth: true, symbol: 'none', lineStyle: { color: '#00e5ff', width: 2 },
+      areaStyle: { color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [{ offset: 0, color: 'rgba(0,229,255,.25)' }, { offset: 1, color: 'rgba(0,229,255,.02)' }]) },
+      data: [] }]
+  });
+
+  const regionChart = safeChart('chartRegion');
+  regionChart && regionChart.setOption({
+    tooltip: { trigger: 'axis', backgroundColor: '#0f1629', borderColor: '#1a2744', textStyle: { color: '#e0e6ed', fontSize: 12 } },
+    grid: { left: 70, right: 16, top: 8, bottom: 8 },
+    xAxis: { type: 'value', splitLine: { lineStyle: { color: '#111d33' } }, axisLabel: { color: '#4a5568', fontSize: 10 } },
+    yAxis: { type: 'category', data: [], axisLine: { show: false }, axisLabel: { color: '#7b8ca3', fontSize: 10 }, axisTick: { show: false } },
+    series: [{ type: 'bar', barWidth: 12, itemStyle: { color: new echarts.graphic.LinearGradient(0, 0, 1, 0, [{ offset: 0, color: '#0052d4' }, { offset: 1, color: '#00e5ff' }]), borderRadius: [0, 3, 3, 0] }, data: [] }]
+  });
+
+  const salesChart = safeChart('chartSales');
+  salesChart && salesChart.setOption({
+    tooltip: { trigger: 'axis', backgroundColor: '#0f1629', borderColor: '#1a2744', textStyle: { color: '#e0e6ed', fontSize: 12 },
+      formatter: p => p.map(s => s.marker + s.seriesName + ': ' + formatNum(s.value)).join('<br>') },
+    legend: { textStyle: { color: '#7b8ca3', fontSize: 10 }, top: 4, itemWidth: 12, itemHeight: 8 },
+    grid: { left: 50, right: 16, top: 30, bottom: 24 },
+    xAxis: { type: 'category', data: [], axisLine: { lineStyle: { color: '#1a2744' } }, axisLabel: { color: '#7b8ca3', fontSize: 10 }, axisTick: { show: false } },
+    yAxis: { type: 'value', splitLine: { lineStyle: { color: '#111d33' } }, axisLabel: { color: '#4a5568', fontSize: 10 } },
+    series: [
+      { name: '客户数', type: 'bar', barWidth: 14, itemStyle: { color: '#448aff', borderRadius: [3, 3, 0, 0] }, data: [] },
+      { name: '在线IP', type: 'bar', barWidth: 14, itemStyle: { color: '#00e5ff', borderRadius: [3, 3, 0, 0] }, data: [] },
+    ]
+  });
+
+  const finChart = safeChart('chartFinance');
+  finChart && finChart.setOption({
+    tooltip: { trigger: 'axis', backgroundColor: '#0f1629', borderColor: '#1a2744', textStyle: { color: '#e0e6ed', fontSize: 12 },
+      formatter: p => p.map(s => s.marker + s.seriesName + ': ' + formatMoney(s.value)).join('<br>') },
+    legend: { textStyle: { color: '#7b8ca3', fontSize: 10 }, top: 4, itemWidth: 12, itemHeight: 8 },
+    grid: { left: 50, right: 16, top: 30, bottom: 24 },
+    xAxis: { type: 'category', data: [], axisLine: { lineStyle: { color: '#1a2744' } }, axisLabel: { color: '#7b8ca3', fontSize: 10 }, axisTick: { show: false },
+      boundaryGap: false },
+    yAxis: { type: 'value', splitLine: { lineStyle: { color: '#111d33' } }, axisLabel: { color: '#4a5568', fontSize: 10, formatter: v => v >= 10000 ? (v/10000)+'万' : v } },
+    series: [
+      { name: '收入', type: 'line', smooth: true, symbol: 'circle', symbolSize: 5, lineStyle: { color: '#00e676', width: 2 },
+        areaStyle: { color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [{ offset: 0, color: 'rgba(0,230,118,.2)' }, { offset: 1, color: 'rgba(0,230,118,.01)' }]) },
+        itemStyle: { color: '#00e676' }, data: [] },
+      { name: '充值', type: 'line', smooth: true, symbol: 'circle', symbolSize: 5, lineStyle: { color: '#00e5ff', width: 2 },
+        itemStyle: { color: '#00e5ff' }, data: [] },
+    ]
+  });
+}
+
+// ========== UPDATE DASHBOARD ==========
+function updateDashboard(data) {
+  if (!data) return;
+  lastData = data;
+  const isToday = currentMode === 'today';
+  updateKPIs(data.marketing, isToday);
+  updateFunnel(data.marketing, data.crm, isToday);
+  updatePricing(data.pricing);
+  updateMap(data.map);
+  updateHourly(data.marketing?.hourly);
+  updateProducts(data.products, isToday);
+  updateRegion(data.products?.region_online);
+  updateSales(data.sales, isToday);
+  updateFinance(data.finance, isToday);
+  document.getElementById('statusText').textContent =
+    '实时监控中 · 上次更新 ' + (data.updated_at || '').substr(11, 8);
+}
+
+function updateKPIs(m, isToday) {
+  if (!m) return;
+  const t = m.today || {}, a = m.total || {};
+  const el = (id, txt) => { const e = document.getElementById(id); if (e) e.textContent = txt; };
+  const lbl = (id, txt) => { const e = document.getElementById(id); if (e) { const l = e.parentElement.querySelector('.kpi-label'); if (l) l.textContent = txt; } };
+
+  // Today mode: hide badges to save space; Total mode: show "今日+X" badges
+  document.querySelectorAll('.kpi-today').forEach(e => e.style.display = isToday ? 'none' : 'block');
+
+  if (isToday) {
+    animateNum(document.getElementById('kpi-visits'), t.visits || 0);
+    animateNum(document.getElementById('kpi-online'), t.online_count || 0);
+    animateNum(document.getElementById('kpi-reg'), t.registrations || 0);
+    animateNum(document.getElementById('kpi-verified'), t.verified || 0);
+    animateNum(document.getElementById('kpi-purchased'), t.purchased || 0);
+    animateNum(document.getElementById('kpi-nopurchase'), a.not_purchased || 0);
+    animateNum(document.getElementById('kpi-churned'), a.churned || 0);
+    lbl('kpi-visits', '今日访问');
+    lbl('kpi-online', '当前在线');
+    lbl('kpi-reg', '今日注册');
+    lbl('kpi-verified', '今日实名');
+    lbl('kpi-purchased', '今日购买');
+    lbl('kpi-nopurchase', '注册未购买');
+    lbl('kpi-churned', '3月未复购');
+  } else {
+    animateNum(document.getElementById('kpi-visits'), a.visits || 0);
+    animateNum(document.getElementById('kpi-online'), t.online_count || 0);
+    animateNum(document.getElementById('kpi-reg'), a.registrations || 0);
+    animateNum(document.getElementById('kpi-verified'), a.verified || 0);
+    animateNum(document.getElementById('kpi-purchased'), a.purchased || 0);
+    animateNum(document.getElementById('kpi-nopurchase'), a.not_purchased || 0);
+    animateNum(document.getElementById('kpi-churned'), a.churned || 0);
+    lbl('kpi-visits', '官网访问总量');
+    lbl('kpi-online', '当前在线');
+    lbl('kpi-reg', '注册总量');
+    lbl('kpi-verified', '实名认证');
+    lbl('kpi-purchased', '已购买用户');
+    lbl('kpi-nopurchase', '注册未购买');
+    lbl('kpi-churned', '3月未复购');
+    el('kpi-visits-today', '今日 +' + formatNum(t.visits || 0));
+    el('kpi-online-detail', (t.online_customers||0) + '用户 ' + (t.online_guests||0) + '访客');
+    el('kpi-reg-today', '今日 +' + formatNum(t.registrations || 0));
+    el('kpi-verified-today', '今日 +' + formatNum(t.verified || 0));
+    el('kpi-purchased-today', '今日 +' + formatNum(t.purchased || 0));
+    el('kpi-unreg', '未注册访客 ' + formatNum(a.unregistered_visitors || 0));
+  }
+}
+
+function updateFunnel(m, crm, isToday) {
+  if (!m) return;
+  const titleEl = document.getElementById('funnelTitle');
+  if (titleEl) titleEl.textContent = isToday ? '今日转化漏斗' : '用户转化漏斗';
+  const src = isToday ? (m.today || {}) : (m.total || {});
+  const maxVal = src.visits || 1;
+  const items = [
+    { id: 'fn-visit', val: src.visits || 0 },
+    { id: 'fn-reg', val: src.registrations || 0 },
+    { id: 'fn-verified', val: src.verified || 0 },
+    { id: 'fn-purchased', val: src.purchased || 0 },
+    { id: 'fn-crm10', val: crm?.spending_10w || 0 },
+    { id: 'fn-crm50', val: crm?.spending_50w || 0 },
+  ];
+  const bars = document.querySelectorAll('#funnelList .f-bar-inner');
+  items.forEach((item, i) => {
+    animateNum(document.getElementById(item.id), item.val);
+    if (bars[i]) bars[i].style.width = Math.max(3, (item.val / maxVal) * 100) + '%';
+  });
+}
+
+function updatePricing(pricing) {
+  const chart = charts['chartPricing'];
+  if (!chart || !pricing) return;
+  const colors = ['#448aff', '#00e5ff', '#7c4dff', '#ffc107', '#ff9800', '#ff5252'];
+  chart.setOption({
+    series: [{ data: pricing.map((p, i) => ({ value: p.value, name: p.label, itemStyle: { color: colors[i] } })) }]
+  });
+}
+
+function updateMap(mapData) {
+  const chart = charts['chartMap'];
+  if (!chart || !mapData || !chinaMapLoaded) return;
+  const toScatter = (arr) => (arr || [])
+    .filter(p => PROVINCE_COORDS[p.name])
+    .map(p => ({ name: p.name, value: [...PROVINCE_COORDS[p.name], p.value] }));
+
+  const visitorScatter = toScatter(mapData.visitors);
+  const customerScatter = toScatter(mapData.customers);
+
+  chart.setOption({
+    series: [
+      {
+        name: '实时访客', type: 'effectScatter', coordinateSystem: 'geo',
+        data: visitorScatter,
+        symbolSize: val => Math.max(8, Math.min(28, Math.sqrt(val[2]) * 3.5)),
+        showEffectOn: 'render',
+        rippleEffect: { brushType: 'stroke', scale: 4, period: 3, number: 2 },
+        itemStyle: { color: '#00e5ff', shadowBlur: 15, shadowColor: 'rgba(0,229,255,.6)' },
+        label: { show: false },
+        tooltip: { formatter: p => p.name + '<br/>实时访客: ' + p.value[2] },
+        zlevel: 4,
+      },
+      {
+        name: '客户分布', type: 'effectScatter', coordinateSystem: 'geo',
+        data: customerScatter,
+        symbolSize: val => Math.max(5, Math.min(20, Math.sqrt(val[2]) * 2.5)),
+        showEffectOn: 'render',
+        rippleEffect: { brushType: 'fill', scale: 2.5, period: 5 },
+        itemStyle: { color: '#ffc107', opacity: 0.9, shadowBlur: 8, shadowColor: 'rgba(255,193,7,.5)' },
+        label: { show: false },
+        tooltip: { formatter: p => p.name + '<br/>客户数: ' + p.value[2] },
+        zlevel: 2,
+      },
+    ]
+  });
+}
+
+function updateHourly(hourly) {
+  const chart = charts['chartHourly'];
+  if (!chart || !hourly) return;
+  chart.setOption({ series: [{ data: hourly.map(h => h.count) }] });
+}
+
+function updateProducts(products, isToday) {
+  if (!products) return;
+  const td = products.today || {};
+  const el = id => document.getElementById(id);
+
+  if (isToday) {
+    animateNum(el('prod-total'), td.new_assigned || 0);
+    document.querySelector('#prod-total + .prod-label').textContent = '今日新开';
+    el('prodTitle').textContent = '今日产品数据';
+    el('crm-expired-lbl').textContent = '今日过期';
+    el('crm-refunded-lbl').textContent = '今日退款';
+    el('crm-renewed-lbl').textContent = '续费3月+';
+  } else {
+    animateNum(el('prod-total'), products.assigned_ips || 0);
+    document.querySelector('#prod-total + .prod-label').textContent = 'IP总量';
+    el('prodTitle').textContent = '在线产品数据';
+    el('crm-expired-lbl').textContent = '过期IP';
+    el('crm-refunded-lbl').textContent = '退款IP';
+    el('crm-renewed-lbl').textContent = '续费3月+';
+  }
+  animateNum(el('prod-single'), products.single_ips || 0);
+  animateNum(el('prod-video'), products.video_lines || 0);
+  animateNum(el('prod-live'), products.live_lines || 0);
+  animateNum(el('crm-expired'), isToday ? (td.expired || 0) : (products.expired_total || 0));
+  animateNum(el('crm-refunded'), isToday ? (td.refunded || 0) : (products.refunded_total || 0));
+  animateNum(el('crm-renewed'), products.renewed_3m || 0);
+}
+
+function updateRegion(regions) {
+  const chart = charts['chartRegion'];
+  if (!chart || !regions) return;
+  const top10 = regions.slice(0, 10).reverse();
+  chart.setOption({
+    yAxis: { data: top10.map(r => r.name || '未知') },
+    series: [{ data: top10.map(r => r.count) }]
+  });
+}
+
+function updateSales(sales, isToday) {
+  const chart = charts['chartSales'];
+  const titleEl = document.getElementById('salesTitle');
+  if (titleEl) titleEl.textContent = isToday ? '今日销售业绩' : '销售业绩排行';
+  if (!chart || !sales || !sales.length) return;
+  const top8 = sales.slice(0, 8);
+  if (isToday) {
+    chart.setOption({
+      xAxis: { data: top8.map(s => s.name) },
+      series: [
+        { name: '今日客户', data: top8.map(s => s.today_customers || 0) },
+        { name: '今日收入', data: top8.map(s => s.today_revenue || 0) },
+      ]
+    });
+  } else {
+    chart.setOption({
+      xAxis: { data: top8.map(s => s.name) },
+      series: [
+        { name: '客户数', data: top8.map(s => s.customers) },
+        { name: '在线IP', data: top8.map(s => s.ips) },
+      ]
+    });
+  }
+}
+
+function updateFinance(finance, isToday) {
+  if (!finance) return;
+  const el = id => document.getElementById(id);
+  const setMoney = (id, val) => { const e = el(id); if (e) e.textContent = '¥' + formatMoney(Math.abs(val || 0)); };
+
+  const titleEl = el('finTitle');
+  const monthCard = el('finMonthCard');
+  const totalRow = el('finTotalRow');
+
+  if (isToday) {
+    if (titleEl) titleEl.textContent = '今日财务概览';
+    if (monthCard) monthCard.style.display = 'none';
+    if (totalRow) totalRow.style.display = 'none';
+    setMoney('fin-today-rev', finance.today_revenue);
+    setMoney('fin-today-topup', finance.today_topup);
+    setMoney('fin-today-refund', finance.today_refund);
+  } else {
+    if (titleEl) titleEl.textContent = '财务概览';
+    if (monthCard) monthCard.style.display = '';
+    if (totalRow) totalRow.style.display = '';
+    setMoney('fin-today-rev', finance.today_revenue);
+    setMoney('fin-today-topup', finance.today_topup);
+    setMoney('fin-today-refund', finance.today_refund);
+    setMoney('fin-month-rev', finance.month_revenue);
+    const totalEl2 = el('fin-total-rev');
+    if (totalEl2) totalEl2.textContent = '¥' + formatMoney(Math.abs(finance.total_revenue || 0));
+  }
+
+  const chart = charts['chartFinance'];
+  if (!chart || !finance.trend) return;
+  chart.setOption({
+    xAxis: { data: finance.trend.map(t => t.date ? t.date.substr(5) : '') },
+    series: [
+      { data: finance.trend.map(t => Math.abs(t.revenue || 0)) },
+      { data: finance.trend.map(t => Math.abs(t.topup || 0)) },
+    ]
+  });
+}
+
+// ========== RESIZE ==========
+function handleResize() {
+  Object.values(charts).forEach(c => {
+    if (!c) return;
+    const dom = c.getDom();
+    if (dom && dom.offsetWidth > 0 && dom.offsetHeight > 0) {
+      c.resize();
+    }
+  });
+  const mapChart = charts['chartMap'];
+  if (mapChart) {
+    const dom = mapChart.getDom();
+    if (dom && dom.offsetWidth > 0 && dom.offsetHeight > 0) {
+      mapChart.setOption({ geo: { zoom: getMapZoom() } });
+    }
+  }
+}
+window.addEventListener('resize', handleResize);
+
+// ========== LOAD CHINA MAP ==========
+async function loadChinaMap() {
+  try {
+    const resp = await fetch('data/china.json');
+    const geoJson = await resp.json();
+    echarts.registerMap('china', geoJson);
+    chinaMapLoaded = true;
+  } catch (e) {
+    console.error('Failed to load china map:', e);
+    showToast('地图数据加载失败');
+  }
+}
+
+// ========== LAYOUT READY HELPER ==========
+function waitForLayout() {
+  return new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+}
+
+// ========== MAIN INIT ==========
+async function init() {
+  document.getElementById('loadingOverlay').style.display = 'flex';
+  document.getElementById('dashboard').style.display = 'none';
+
+  const [_, data] = await Promise.all([loadChinaMap(), fetchData()]);
+
+  if (!data) {
+    if (!document.getElementById('authOverlay').style.display ||
+        document.getElementById('authOverlay').style.display === 'none') {
+      showAuth('无法加载数据，请检查密钥或网络');
+    }
+    return;
+  }
+
+  // Show dashboard FIRST so containers get real dimensions
+  document.getElementById('loadingOverlay').style.display = 'none';
+  document.getElementById('dashboard').style.display = 'grid';
+
+  // Wait for browser to finish layout
+  await waitForLayout();
+
+  // NOW init charts — containers have proper width/height
+  initCharts();
+  updateDashboard(data);
+  handleResize();
+  setTimeout(handleResize, 300);
+
+  if (refreshTimer) clearInterval(refreshTimer);
+  refreshTimer = setInterval(async () => {
+    const newData = await fetchData();
+    if (newData) { updateDashboard(newData); triggerRefreshPulse(); }
+  }, CONFIG.refreshMs);
+}
+
+// ========== PARTICLES ==========
+function createParticles() {
+  const colors = ['rgba(0,229,255,.3)', 'rgba(124,77,255,.2)', 'rgba(0,230,118,.2)', 'rgba(255,193,7,.15)'];
+  for (let i = 0; i < 20; i++) {
+    const p = document.createElement('div');
+    p.className = 'particle';
+    const size = 2 + Math.random() * 3;
+    p.style.cssText = `
+      width:${size}px;height:${size}px;
+      left:${Math.random()*100}%;
+      background:${colors[Math.floor(Math.random()*colors.length)]};
+      animation-duration:${8+Math.random()*12}s;
+      animation-delay:${Math.random()*10}s;
+    `;
+    document.body.appendChild(p);
+  }
+}
+
+// ========== REFRESH PULSE ==========
+function triggerRefreshPulse() {
+  document.querySelectorAll('.kpi-card').forEach(card => {
+    card.classList.remove('refresh-pulse');
+    void card.offsetWidth;
+    card.classList.add('refresh-pulse');
+  });
+}
+
+// ========== START ==========
+updateClock();
+setInterval(updateClock, 1000);
+createParticles();
+
+// Show back button only when embedded in iframe (admin panel), not standalone
+try {
+  if (window.self !== window.top && getSanctumToken()) {
+    document.getElementById('backBtn').style.display = 'block';
+  }
+} catch(e) {}
+
+if (hasAuth()) {
+  init();
+} else {
+  document.getElementById('loadingOverlay').style.display = 'none';
+  showAuth();
+}
+</script>
+</body>
+</html>

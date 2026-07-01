@@ -1,0 +1,304 @@
+@use './variables' as *;
+
+// ===== Element Plus 主题覆盖 =====
+:root {
+  --el-color-primary: #{$color-primary};
+  --el-color-primary-light-3: #{$color-primary-light};
+  --el-color-primary-light-5: #F5C78A;
+  --el-color-primary-light-7: #FAE0B5;
+  --el-color-primary-light-8: #FDF0E2;
+  --el-color-primary-light-9: #FEF7F0;
+  --el-color-primary-dark-2: #{$color-primary-dark};
+
+  --el-border-radius-base: #{$border-radius};
+  --el-border-color: #{$border-color};
+  --el-border-color-light: #F0E6DA;
+  --el-border-color-lighter: #F7F0E8;
+
+  --el-text-color-primary: #{$text-primary};
+  --el-text-color-regular: #{$text-regular};
+  --el-text-color-secondary: #{$text-secondary};
+
+  --el-bg-color: #FFFFFF;
+  --el-bg-color-page: #{$content-bg};
+
+  --el-fill-color-light: #FEF7F0;
+  --el-fill-color-lighter: #FFFBF5;
+}
+
+// ===== 全局基础样式 =====
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  font-family: 'PingFang SC', 'Microsoft YaHei', 'Helvetica Neue', Helvetica, Arial, sans-serif;
+  color: $text-primary;
+  background: $content-bg;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+// ===== 卡片美化 =====
+.el-card {
+  border: 1px solid $border-color !important;
+  border-radius: $border-radius-lg !important;
+  box-shadow: $shadow-sm !important;
+  transition: box-shadow 0.2s ease;
+
+  &:hover {
+    box-shadow: $shadow-md !important;
+  }
+}
+
+// ===== 按钮美化 (只对实心按钮生效，link/text 不受影响) =====
+.el-button--primary:not(.is-link):not(.is-text):not(.is-plain) {
+  background: linear-gradient(135deg, $color-primary, $color-primary-light) !important;
+  border-color: $color-primary !important;
+  color: #fff !important;
+
+  &:hover,
+  &:focus {
+    background: linear-gradient(135deg, $color-primary-dark, $color-primary) !important;
+    border-color: $color-primary-dark !important;
+    color: #fff !important;
+  }
+}
+
+// Link 按钮保持原生样式，只改颜色
+.el-button.is-link {
+  background: transparent !important;
+  border: none !important;
+  padding: 4px 8px !important;
+  height: auto !important;
+
+  &.el-button--primary { color: #{$color-primary} !important; }
+  &.el-button--success { color: #67C23A !important; }
+  &.el-button--warning { color: #E6A23C !important; }
+  &.el-button--danger { color: #F56C6C !important; }
+  &.el-button--info { color: #909399 !important; }
+
+  &:hover {
+    background: transparent !important;
+    opacity: 0.75;
+  }
+}
+
+// el-link 组件
+.el-link.el-link--primary { color: #{$color-primary} !important; }
+
+// ===== 表格美化 =====
+.el-table {
+  --el-table-header-bg-color: #FEF7F0;
+  --el-table-header-text-color: #{$text-primary};
+  --el-table-row-hover-bg-color: #FFFBF5;
+  --el-table-border-color: #{$border-color};
+
+  th.el-table__cell {
+    font-weight: 600;
+    font-size: 13px;
+  }
+}
+
+// ===== 分页美化 =====
+.el-pagination {
+  --el-pagination-button-bg-color: #FEF7F0;
+  --el-pagination-hover-color: #{$color-primary};
+}
+
+// ===== Tag 样式 =====
+.el-tag--success {
+  --el-tag-bg-color: #E8F8E0;
+  --el-tag-border-color: #C8E6B8;
+  --el-tag-text-color: #529E3C;
+}
+
+.el-tag--warning {
+  --el-tag-bg-color: #FEF0D5;
+  --el-tag-border-color: #F5D69C;
+  --el-tag-text-color: #C88C1E;
+}
+
+.el-tag--danger {
+  --el-tag-bg-color: #FDECEC;
+  --el-tag-border-color: #F5C4C4;
+  --el-tag-text-color: #D14D4D;
+}
+
+// ===== 通用页面样式 =====
+.page-title {
+  margin: 0 0 20px 0;
+  font-size: 20px;
+  font-weight: 600;
+  color: $text-primary;
+}
+
+.search-card {
+  margin-bottom: 16px;
+
+  :deep(.el-card__body) {
+    padding-bottom: 2px;
+  }
+}
+
+.pagination-wrap {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 16px;
+}
+
+.text-danger {
+  color: $color-danger;
+}
+
+.text-success {
+  color: $color-success;
+}
+
+.text-warning {
+  color: $color-warning;
+}
+
+// ===== 滚动条美化 =====
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #D4C4B0;
+  border-radius: 3px;
+
+  &:hover {
+    background: #BBA98F;
+  }
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+// ===== 手机端全局适配 =====
+@media (max-width: 768px) {
+  // ---- Dialog 全宽 ----
+  .el-dialog {
+    width: 94vw !important;
+    max-width: 94vw !important;
+    margin: 8vh auto !important;
+  }
+  .el-dialog__header {
+    padding: 12px 14px 8px !important;
+  }
+  .el-dialog__body {
+    padding: 8px 14px !important;
+    max-height: 70vh;
+    overflow-y: auto;
+  }
+  .el-dialog__footer {
+    padding: 8px 14px 12px !important;
+  }
+  .el-message-box {
+    width: 90vw !important;
+  }
+
+  // ---- 表格字号缩小 ----
+  .el-table {
+    font-size: 12px;
+
+    th.el-table__cell,
+    td.el-table__cell {
+      padding: 6px 0 !important;
+    }
+    .cell {
+      padding: 0 8px !important;
+    }
+  }
+
+  // ---- 分页：换行居中，隐藏不需要的 ----
+  .el-pagination {
+    flex-wrap: wrap;
+    justify-content: center;
+    padding: 4px 0;
+
+    .el-pagination__sizes,
+    .el-pagination__jump,
+    .el-pagination__total {
+      display: none !important;
+    }
+  }
+
+  // ---- 卡片 padding ----
+  .el-card > .el-card__body {
+    padding: 12px !important;
+  }
+
+  // ---- Form inline 变堆叠 ----
+  .el-form--inline .el-form-item {
+    display: block !important;
+    margin-right: 0 !important;
+    margin-bottom: 10px !important;
+    width: 100%;
+  }
+  .el-form--inline .el-form-item__content {
+    width: 100% !important;
+  }
+  .el-form--inline .el-input,
+  .el-form--inline .el-select,
+  .el-form--inline .el-date-editor {
+    width: 100% !important;
+  }
+
+  // ---- 按钮组换行/紧凑 ----
+  .el-form--inline .el-form-item:last-child .el-button {
+    margin-bottom: 4px;
+  }
+  .el-button + .el-button {
+    margin-left: 4px;
+  }
+
+  // ---- 面包屑字号 ----
+  .el-breadcrumb {
+    font-size: 12px;
+  }
+
+  // ---- 页面标题统一缩小 ----
+  .page-title {
+    font-size: 17px !important;
+    margin-bottom: 12px !important;
+  }
+
+  // ---- Descriptions 紧凑 ----
+  .el-descriptions {
+    .el-descriptions__label,
+    .el-descriptions__content {
+      padding: 6px 8px !important;
+      font-size: 12px !important;
+    }
+  }
+
+  // ---- Row/Col 在手机端统一变单列（按需由页面覆盖） ----
+  .el-row > .el-col {
+    &.mobile-full {
+      flex: 0 0 100% !important;
+      max-width: 100% !important;
+    }
+  }
+
+  // ---- 输入框更紧凑 ----
+  .el-input__wrapper {
+    padding: 0 8px;
+  }
+
+  // ---- Tabs ----
+  .el-tabs__item {
+    padding: 0 12px !important;
+    font-size: 13px;
+  }
+
+  // ---- Dropdown menu 字号 ----
+  .el-dropdown-menu__item {
+    font-size: 13px;
+  }
+}

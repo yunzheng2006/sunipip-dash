@@ -1,0 +1,166 @@
+/* ============================================================
+   VIP 等级卡片 — 合作模式卡片风格
+   追加到 assets/styles.css 末尾。沿用 --brand / --accent / --border
+   等现有 CSS 变量，与其它板块视觉一致。
+   ============================================================ */
+
+.vip-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 24px;
+}
+
+.vip-card {
+  position: relative;
+  padding: 36px 30px;
+  background: #fff;
+  border: 1.5px solid var(--border);
+  border-radius: var(--radius-lg);
+  transition: all .25s ease;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+
+  /* 每个卡片通过内联 style="--tier-color:#xxx" 继承徽章色 */
+  --tier-color: var(--brand);
+}
+
+.vip-card::before {
+  content: "";
+  position: absolute; top: 0; left: 0; right: 0; height: 4px;
+  background: linear-gradient(90deg, var(--tier-color), var(--accent));
+  transform: scaleX(0);
+  transform-origin: left;
+  transition: transform .3s ease;
+}
+
+.vip-card:hover {
+  border-color: var(--tier-color);
+  transform: translateY(-4px);
+  box-shadow: var(--shadow-lg);
+}
+.vip-card:hover::before { transform: scaleX(1); }
+.vip-card:hover .vip-card__cta span { transform: translateX(4px); }
+
+.vip-card__icon {
+  width: 64px;
+  height: 64px;
+  margin-bottom: 20px;
+}
+.vip-card__icon img {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.vip-card__title {
+  font-size: 22px;
+  font-weight: 800;
+  color: var(--text);
+  margin: 0 0 10px;
+  line-height: 1.25;
+}
+
+.vip-card__price {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  margin-bottom: 18px;
+  flex-wrap: wrap;
+}
+.vip-card__num {
+  font-size: 44px;
+  font-weight: 900;
+  line-height: 1;
+  font-family: 'Inter', -apple-system, 'SF Pro Display', system-ui, sans-serif;
+  background: linear-gradient(135deg, var(--tier-color), #FFC441);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+.vip-card__unit {
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--tier-color);
+  margin-right: 6px;
+}
+.vip-card__save {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--brand-600);
+  background: var(--brand-50);
+  padding: 4px 10px;
+  border-radius: var(--radius-pill);
+  letter-spacing: .02em;
+}
+
+.vip-card__desc {
+  font-size: 15px;
+  color: var(--text-2);
+  margin: 0 0 20px;
+  min-height: 48px;
+  line-height: 1.6;
+}
+
+.vip-card__features {
+  list-style: none;
+  padding: 0;
+  margin: 0 0 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.vip-card__features li {
+  font-size: 14px;
+  color: var(--text-2);
+  padding-left: 24px;
+  position: relative;
+  line-height: 1.5;
+}
+.vip-card__features li::before {
+  content: "✓";
+  position: absolute;
+  left: 0;
+  top: 0;
+  color: var(--tier-color);
+  font-weight: 800;
+  font-size: 15px;
+}
+.vip-card__features b {
+  color: var(--brand-600);
+  font-weight: 700;
+}
+
+.vip-card__cta {
+  margin-top: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--accent);
+  font-weight: 700;
+  font-size: 14px;
+  text-decoration: none;
+}
+.vip-card__cta span {
+  transition: transform .2s;
+}
+
+/* 移动端 */
+@media (max-width: 768px) {
+  .vip-grid {
+    grid-template-columns: 1fr;
+    gap: 14px;
+  }
+  .vip-card {
+    padding: 24px 20px;
+    border-radius: var(--radius);
+  }
+  .vip-card:hover { transform: none; }
+  .vip-card__icon { width: 52px; height: 52px; margin-bottom: 14px; }
+  .vip-card__title { font-size: 19px; }
+  .vip-card__num { font-size: 36px; }
+  .vip-card__unit { font-size: 17px; }
+  .vip-card__save { font-size: 11px; padding: 3px 8px; }
+  .vip-card__desc { font-size: 13px; min-height: 0; margin-bottom: 16px; }
+  .vip-card__features li { font-size: 13px; padding-left: 20px; }
+}

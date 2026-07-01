@@ -1,0 +1,136 @@
+// 全局变量 — 蓝白主色 + 黄色点缀
+:root {
+  --brand-primary: #4F6AF6;
+  --brand-primary-dark: #3B51D4;
+  --brand-primary-light: #EEF1FE;
+  --accent-yellow: #F5A623;
+  --bg-page: #F7F8FC;
+  --bg-card: #FFFFFF;
+  --text-primary: #1E293B;
+  --text-secondary: #475569;
+  --text-muted: #94A3B8;
+  --border-color: #E2E8F0;
+  --sidebar-bg: #1E2A3A;
+  --sidebar-active: #4F6AF6;
+}
+
+// 覆盖 Element Plus 主色
+:root {
+  --el-color-primary: #4F6AF6;
+  --el-color-primary-light-3: #7B8FF8;
+  --el-color-primary-light-5: #A7B4FA;
+  --el-color-primary-light-7: #C5CDFC;
+  --el-color-primary-light-8: #D9DFFE;
+  --el-color-primary-light-9: #EEF1FE;
+  --el-color-primary-dark-2: #3B51D4;
+}
+
+.mono {
+  font-family: 'SF Mono', Consolas, Monaco, monospace;
+}
+
+// 滚动条美化
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: #CBD5E1;
+  border-radius: 4px;
+  &:hover { background: #94A3B8; }
+}
+
+// 按钮 hover 微动效
+.el-button {
+  transition: all 0.2s ease;
+  &:hover:not(:disabled) {
+    transform: translateY(-1px);
+    box-shadow: 0 4px 12px rgba(79, 106, 246, 0.2);
+  }
+  &:active:not(:disabled) {
+    transform: translateY(0);
+  }
+}
+
+// ===== 移动端全局优化 =====
+@media (max-width: 768px) {
+  // Element Plus 对话框移动端适配
+  .el-dialog {
+    width: 92% !important;
+    max-width: 92vw !important;
+    margin: 6vh auto !important;
+    --el-dialog-padding-primary: 14px;
+    .el-dialog__header { padding: 12px 14px 8px; font-size: 15px; }
+    .el-dialog__body { padding: 8px 14px; }
+    .el-dialog__footer {
+      padding: 8px 14px 12px;
+      display: flex; gap: 8px;
+      .el-button { flex: 1; }
+    }
+  }
+
+  // 表格移动端
+  .el-table {
+    font-size: 12px;
+    .el-table__header th { font-size: 11px; padding: 6px 0; white-space: nowrap; }
+    .el-table__body td { padding: 6px 0; }
+    .cell { padding: 0 8px !important; line-height: 1.4; }
+  }
+  // 表格容器允许横向滚动，列不挤压
+  .el-card__body .el-table {
+    min-width: 100%;
+    .el-table__body-wrapper, .el-table__header-wrapper {
+      overflow-x: auto;
+      -webkit-overflow-scrolling: touch;
+    }
+  }
+
+  // 表单移动端
+  .el-form--inline .el-form-item {
+    margin-right: 0;
+    margin-bottom: 8px;
+    width: 100%;
+  }
+
+  // 分页移动端
+  .el-pagination {
+    flex-wrap: wrap;
+    justify-content: center;
+    .el-pagination__sizes, .el-pagination__jump { display: none; }
+    .el-pagination__total { font-size: 12px; }
+  }
+
+  // 卡片圆角
+  .el-card { border-radius: 10px; }
+
+  // 弹出消息位置
+  .el-message { min-width: auto; max-width: 90vw; }
+  .el-message-box { width: 90% !important; }
+
+  // 标签页
+  .el-tabs__nav-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  .el-tabs__item { padding: 0 10px; font-size: 13px; }
+
+  // 按钮组
+  .el-radio-group { flex-wrap: wrap; }
+  .el-radio-button__inner { padding: 6px 10px; font-size: 12px; }
+
+  // 防止水平溢出
+  body { overflow-x: hidden; }
+
+  // Alert 自适应
+  .el-alert {
+    .el-alert__content { word-break: break-word; }
+    .el-alert__description { font-size: 12px; line-height: 1.6; }
+  }
+
+  // 表单 label 移动端
+  .el-form-item__label { font-size: 13px; }
+  .el-form-item__content { font-size: 13px; }
+
+  // InputNumber 移动端
+  .el-input-number { max-width: 100%; }
+}

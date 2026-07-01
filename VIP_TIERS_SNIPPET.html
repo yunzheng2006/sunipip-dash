@@ -1,0 +1,46 @@
+<!-- ============================================================
+     VIP 等级 - 合作模式卡片风格 (替换 partnership.html 中的 #vip-tiers 板块)
+     占位符 <!--LIVE_VIP_CARDS--> ... <!--/LIVE_VIP_CARDS--> 保留，
+     让你原有的服务端注入脚本在其中循环输出 .vip-card 即可。
+     ============================================================ -->
+
+<section id="vip-tiers" class="sec" style="background:var(--bg-soft);">
+  <div class="container">
+    <div class="sec-head">
+      <span class="sec-tag">会员权益</span>
+      <h2>所有 VIP 等级 · 总有一款适合您</h2>
+      <p>累计充值达门槛自动升级，一经达成永久有效</p>
+    </div>
+
+    <div class="vip-grid">
+      <!--LIVE_VIP_CARDS-->
+      <!-- 下方是单张卡片模板 (替换 {{...}} 占位符, 按 API 返回的 tier 列表循环) -->
+      <article class="vip-card" style="--tier-color:{{badge_color || '#F7A600'}};">
+        <div class="vip-card__icon">
+          <img src="/img/icons/{{icon_name}}.svg" alt="">
+        </div>
+        <h3 class="vip-card__title">{{name}}</h3>
+        <div class="vip-card__price">
+          <span class="vip-card__num">{{discount_percent / 10}}</span>
+          <span class="vip-card__unit">折</span>
+          <span class="vip-card__save">立省 {{100 - discount_percent}}%</span>
+        </div>
+        <p class="vip-card__desc">{{description || '达成门槛即永久享折扣，全平台 IP 产品统一生效。'}}</p>
+        <ul class="vip-card__features">
+          <li>累计消费满 <b>¥{{spending_threshold}}</b></li>
+          <li>或单笔充值满 <b>¥{{topup_threshold}}</b></li>
+          <li>购 IP 立省 <b>{{100 - discount_percent}}%</b>，永久有效</li>
+          <li>达成条件满足任一即可升级</li>
+        </ul>
+        <a class="vip-card__cta" href="https://user.sunipip.uk" target="_blank" rel="noopener">
+          立即开始 <span>→</span>
+        </a>
+      </article>
+      <!--/LIVE_VIP_CARDS-->
+    </div>
+
+    <p style="text-align:center;margin-top:30px;color:var(--muted);font-size:13px;">
+      等级基于您的累计充值金额自动评定，一经达成永久有效。具体优惠以用户中心实时展示为准。
+    </p>
+  </div>
+</section>

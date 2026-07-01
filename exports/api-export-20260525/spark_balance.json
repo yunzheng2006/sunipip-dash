@@ -1,0 +1,13 @@
+{
+    "amount": 10055,
+    "lastFlow": 0,
+    "totalFlow": 0,
+    "ext": {
+        "available": 10055,
+        "frozen": 0,
+        "receivable": 0,
+        "creditLimit": 0,
+        "payMode": "PREPAID",
+        "currency": "CNY"
+    }
+}

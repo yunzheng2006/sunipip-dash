@@ -1,0 +1,293 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>SuniPIP Router</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#f0f2f5;color:#333;min-height:100vh}
+.container{max-width:640px;margin:0 auto;padding:20px}
+.header{text-align:center;padding:32px 0 24px}
+.logo{font-size:28px;font-weight:700;color:#1e293b;letter-spacing:-0.5px}
+.logo span{background:linear-gradient(135deg,#667eea,#764ba2);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+.subtitle{color:#94a3b8;font-size:13px;margin-top:4px}
+.card{background:#fff;border-radius:12px;box-shadow:0 1px 8px rgba(0,0,0,.06);padding:24px;margin-bottom:16px}
+.card-title{font-size:16px;font-weight:600;color:#1e293b;margin-bottom:16px;display:flex;align-items:center;gap:8px}
+.card-title .icon{font-size:18px}
+.hw-diagram{background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:20px;text-align:center;margin-bottom:16px}
+.hw-box{display:inline-block;background:#1e293b;color:#fff;border-radius:8px;padding:16px 20px;position:relative}
+.hw-ports{display:flex;gap:8px;margin-bottom:12px}
+.hw-port{width:48px;height:32px;border:2px solid #475569;border-radius:4px;display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:600;background:#334155}
+.hw-port.wan{border-color:#22c55e;background:#166534;color:#bbf7d0}
+.hw-power{width:32px;height:32px;border:2px solid #475569;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:8px;background:#334155;color:#94a3b8}
+.hw-label{font-size:11px;color:#94a3b8;margin-top:4px}
+.hw-arrow{color:#22c55e;font-size:12px;margin-top:8px}
+.status-row{display:flex;align-items:center;gap:8px;padding:12px 16px;border-radius:8px;font-size:14px;margin-bottom:12px}
+.status-ok{background:#f0fdf4;border:1px solid #bbf7d0;color:#16a34a}
+.status-err{background:#fef2f2;border:1px solid #fecaca;color:#dc2626}
+.status-loading{background:#f0f9ff;border:1px solid #bae6fd;color:#0284c7}
+.dot{width:8px;height:8px;border-radius:50%;background:currentColor}
+.dot.pulse{animation:pulse 1.5s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;padding:10px 20px;border-radius:8px;border:none;font-size:14px;font-weight:500;cursor:pointer;transition:all .2s;width:100%}
+.btn-primary{background:#667eea;color:#fff}.btn-primary:hover{background:#5a6fd6}
+.btn-outline{background:#fff;color:#475569;border:1px solid #e2e8f0}.btn-outline:hover{background:#f8fafc}
+.btn-success{background:#16a34a;color:#fff}.btn-success:hover{background:#15803d}
+.btn:disabled{opacity:.5;cursor:not-allowed}
+.info-text{font-size:13px;color:#64748b;line-height:1.7}
+.info-text a{color:#667eea;text-decoration:none}
+.tip{font-size:12px;color:#94a3b8;margin-top:8px}
+.result-text{font-size:14px;font-weight:500;flex:1}
+.form-group{margin-bottom:14px}
+.form-label{display:block;font-size:13px;font-weight:500;color:#475569;margin-bottom:6px}
+.form-input{width:100%;padding:9px 12px;border:1px solid #e2e8f0;border-radius:8px;font-size:14px;outline:none;transition:border-color .2s}
+.form-input:focus{border-color:#667eea;box-shadow:0 0 0 3px rgba(102,126,234,.1)}
+.wan-info{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:16px}
+.wan-info-item{background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:10px 12px}
+.wan-info-label{font-size:11px;color:#94a3b8;letter-spacing:.5px}
+.wan-info-value{font-size:14px;font-weight:600;color:#1e293b;margin-top:2px;word-break:break-all}
+.hidden{display:none}
+.mode-tabs{display:flex;gap:4px;background:#f1f5f9;border-radius:8px;padding:4px;margin-bottom:16px}
+.mode-tab{flex:1;padding:8px;border:none;background:none;border-radius:6px;font-size:13px;font-weight:500;color:#64748b;cursor:pointer;transition:all .2s}
+.mode-tab.active{background:#fff;color:#1e293b;box-shadow:0 1px 3px rgba(0,0,0,.1)}
+.alert{padding:12px 16px;border-radius:8px;font-size:13px;margin-bottom:12px}
+.alert-success{background:#f0fdf4;border:1px solid #bbf7d0;color:#16a34a}
+.alert-error{background:#fef2f2;border:1px solid #fecaca;color:#dc2626}
+</style>
+</head>
+<body>
+<div class="container">
+  <div class="header">
+    <div class="logo"><span>SuniPIP</span> Router</div>
+    <div class="subtitle">sunipip.com</div>
+  </div>
+
+  <div class="card">
+    <div class="card-title"><span class="icon">|</span> 接口说明</div>
+    <div class="hw-diagram">
+      <div class="hw-box">
+        <div class="hw-ports">
+          <div class="hw-port">ETH3</div>
+          <div class="hw-port">ETH2</div>
+          <div class="hw-port">ETH1</div>
+          <div class="hw-port wan">ETH0</div>
+          <div class="hw-power">PWR</div>
+        </div>
+        <div class="hw-label">网口 . . . . . . . . . . 电源</div>
+      </div>
+      <div class="hw-arrow">请将网线插入靠近电源口的 <b>ETH0</b> 口</div>
+    </div>
+    <div class="info-text">
+      <b>ETH0</b>: 外网口 (WAN) - 连接光猫或上级路由器<br>
+      <b>ETH1</b>: 管理口 - 连接电脑访问此页面<br>
+      <b>ETH2</b>: AP 口 - 连接无线 AP<br>
+      <b>ETH3</b>: 有线口 (LAN) - 直连上网，不经代理
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title"><span class="icon">*</span> 网络状态</div>
+    <div id="net-status" class="status-row status-loading">
+      <span class="dot pulse"></span>
+      <span class="result-text">正在检测网络连接...</span>
+    </div>
+    <button class="btn btn-primary" id="btn-check" onclick="checkNetwork()">检测网络</button>
+    <p class="tip">通过 ping 223.5.5.5 检测外网连通性</p>
+  </div>
+
+  <div class="card">
+    <div class="card-title"><span class="icon">#</span> 外网配置 (WAN)</div>
+    <div id="wan-alert"></div>
+    <div id="wan-current" class="wan-info">
+      <div class="wan-info-item"><div class="wan-info-label">上网方式</div><div class="wan-info-value" id="wan-mode-text">--</div></div>
+      <div class="wan-info-item"><div class="wan-info-label">IP 地址</div><div class="wan-info-value" id="wan-ip-text">--</div></div>
+      <div class="wan-info-item"><div class="wan-info-label">网关</div><div class="wan-info-value" id="wan-gw-text">--</div></div>
+      <div class="wan-info-item"><div class="wan-info-label">DNS</div><div class="wan-info-value" id="wan-dns-text">--</div></div>
+    </div>
+
+    <div class="mode-tabs">
+      <button class="mode-tab active" data-mode="dhcp" onclick="switchWanMode('dhcp')">自动获取 (DHCP)</button>
+      <button class="mode-tab" data-mode="static" onclick="switchWanMode('static')">静态 IP</button>
+      <button class="mode-tab" data-mode="pppoe" onclick="switchWanMode('pppoe')">PPPoE 拨号</button>
+    </div>
+
+    <div id="wan-form-dhcp">
+      <div class="info-text" style="margin-bottom:16px">从光猫或上级路由器自动获取 IP 地址。</div>
+    </div>
+
+    <div id="wan-form-static" class="hidden">
+      <div class="form-group">
+        <label class="form-label">IP 地址</label>
+        <input class="form-input" id="wan-static-ip" placeholder="192.168.1.100">
+      </div>
+      <div class="form-group">
+        <label class="form-label">子网掩码</label>
+        <input class="form-input" id="wan-static-netmask" placeholder="255.255.255.0" value="255.255.255.0">
+      </div>
+      <div class="form-group">
+        <label class="form-label">网关</label>
+        <input class="form-input" id="wan-static-gateway" placeholder="192.168.1.1">
+      </div>
+      <div class="form-group">
+        <label class="form-label">DNS 1</label>
+        <input class="form-input" id="wan-static-dns1" placeholder="223.5.5.5" value="223.5.5.5">
+      </div>
+      <div class="form-group">
+        <label class="form-label">DNS 2（可选）</label>
+        <input class="form-input" id="wan-static-dns2" placeholder="119.29.29.29" value="119.29.29.29">
+      </div>
+    </div>
+
+    <div id="wan-form-pppoe" class="hidden">
+      <div class="form-group">
+        <label class="form-label">PPPoE 账号</label>
+        <input class="form-input" id="wan-pppoe-user" placeholder="宽带账号">
+      </div>
+      <div class="form-group">
+        <label class="form-label">PPPoE 密码</label>
+        <input class="form-input" id="wan-pppoe-pass" type="password" placeholder="宽带密码">
+      </div>
+      <div class="info-text">PPPoE 拨号上网，适用于直接连接光猫的场景。</div>
+    </div>
+
+    <button class="btn btn-success" id="btn-wan-save" onclick="saveWanConfig()" style="margin-top:12px">保存并应用</button>
+    <p class="tip">更改上网方式后网络会短暂中断</p>
+  </div>
+
+  <div class="card">
+    <div class="card-title"><span class="icon">@</span> 设备管理</div>
+    <div class="info-text" style="margin-bottom:16px">
+      管理 WiFi 账号和代理节点：<br>
+      <a href="https://user.sunipip.com/router" target="_blank"><b>user.sunipip.com</b></a>
+    </div>
+    <a href="https://user.sunipip.com/router" target="_blank" class="btn btn-outline" style="text-decoration:none">
+      进入管理平台
+    </a>
+  </div>
+
+  <div class="card" id="card-info">
+    <div class="card-title"><span class="icon">i</span> 系统信息</div>
+    <div class="wan-info">
+      <div class="wan-info-item"><div class="wan-info-label">Agent 版本</div><div class="wan-info-value" id="info-agent-ver">--</div></div>
+      <div class="wan-info-item"><div class="wan-info-label">配置版本</div><div class="wan-info-value" id="info-config-ver">--</div></div>
+      <div class="wan-info-item"><div class="wan-info-label">CPU 温度</div><div class="wan-info-value" id="info-cpu">--</div></div>
+      <div class="wan-info-item"><div class="wan-info-label">内存</div><div class="wan-info-value" id="info-mem">--</div></div>
+    </div>
+  </div>
+</div>
+
+<script>
+var currentWanMode='dhcp';
+
+async function checkNetwork(){
+  var btn=document.getElementById('btn-check'),el=document.getElementById('net-status');
+  btn.disabled=true;btn.textContent='检测中...';
+  el.className='status-row status-loading';
+  el.innerHTML='<span class="dot pulse"></span><span class="result-text">正在检测网络连接...</span>';
+  try{
+    var r=await fetch('/api/network-check');var d=await r.json();
+    if(d.data&&d.data.connected){
+      el.className='status-row status-ok';
+      el.innerHTML='<span class="dot"></span><span class="result-text">已连接'+(d.data.latency?' - 延迟 '+d.data.latency:'')+'</span>';
+    }else{
+      el.className='status-row status-err';
+      el.innerHTML='<span class="dot"></span><span class="result-text">无法连接外网，请检查 ETH0 网线是否插好</span>';
+    }
+  }catch(e){
+    el.className='status-row status-err';
+    el.innerHTML='<span class="dot"></span><span class="result-text">检测失败，Agent 服务可能未运行</span>';
+  }
+  btn.disabled=false;btn.textContent='重新检测';
+}
+
+function switchWanMode(mode){
+  currentWanMode=mode;
+  document.querySelectorAll('.mode-tab').forEach(function(t){t.classList.remove('active')});
+  document.querySelectorAll('.mode-tab').forEach(function(t){if(t.dataset.mode===mode)t.classList.add('active')});
+  document.getElementById('wan-form-dhcp').classList.toggle('hidden',mode!=='dhcp');
+  document.getElementById('wan-form-static').classList.toggle('hidden',mode!=='static');
+  document.getElementById('wan-form-pppoe').classList.toggle('hidden',mode!=='pppoe');
+}
+
+async function loadWanStatus(){
+  try{
+    var r=await fetch('/api/wan-config');
+    var d=await r.json();
+    if(d.success&&d.data){
+      var w=d.data;
+      var modeMap={dhcp:'自动获取 (DHCP)',static:'静态 IP',pppoe:'PPPoE 拨号'};
+      document.getElementById('wan-mode-text').textContent=modeMap[w.mode]||w.mode;
+      document.getElementById('wan-ip-text').textContent=w.ip||'--';
+      document.getElementById('wan-gw-text').textContent=w.gateway||'--';
+      document.getElementById('wan-dns-text').textContent=(w.dns1||'--')+(w.dns2?' / '+w.dns2:'');
+      switchWanMode(w.mode||'dhcp');
+      if(w.mode==='static'){
+        if(w.ip)document.getElementById('wan-static-ip').value=w.ip;
+        if(w.netmask)document.getElementById('wan-static-netmask').value=w.netmask;
+        if(w.gateway)document.getElementById('wan-static-gateway').value=w.gateway;
+        if(w.dns1)document.getElementById('wan-static-dns1').value=w.dns1;
+        if(w.dns2)document.getElementById('wan-static-dns2').value=w.dns2;
+      }else if(w.mode==='pppoe'&&w.pppoe_user){
+        document.getElementById('wan-pppoe-user').value=w.pppoe_user;
+      }
+    }
+  }catch(e){console.log('WAN status load failed',e)}
+}
+
+async function saveWanConfig(){
+  var btn=document.getElementById('btn-wan-save');
+  var alertEl=document.getElementById('wan-alert');
+  btn.disabled=true;btn.textContent='保存中...';alertEl.innerHTML='';
+
+  var body={mode:currentWanMode};
+  if(currentWanMode==='static'){
+    body.ip=document.getElementById('wan-static-ip').value;
+    body.netmask=document.getElementById('wan-static-netmask').value;
+    body.gateway=document.getElementById('wan-static-gateway').value;
+    body.dns1=document.getElementById('wan-static-dns1').value;
+    body.dns2=document.getElementById('wan-static-dns2').value;
+    if(!body.ip||!body.gateway){alertEl.innerHTML='<div class="alert alert-error">请填写 IP 地址和网关</div>';btn.disabled=false;btn.textContent='保存并应用';return}
+  }else if(currentWanMode==='pppoe'){
+    body.pppoe_user=document.getElementById('wan-pppoe-user').value;
+    body.pppoe_pass=document.getElementById('wan-pppoe-pass').value;
+    if(!body.pppoe_user||!body.pppoe_pass){alertEl.innerHTML='<div class="alert alert-error">请填写 PPPoE 账号和密码</div>';btn.disabled=false;btn.textContent='保存并应用';return}
+  }
+
+  try{
+    var r=await fetch('/api/wan-config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    var d=await r.json();
+    if(d.success){
+      alertEl.innerHTML='<div class="alert alert-success">上网方式已更新，正在重新连接...</div>';
+      setTimeout(function(){loadWanStatus();checkNetwork();alertEl.innerHTML=''},5000);
+    }else{
+      alertEl.innerHTML='<div class="alert alert-error">'+(d.message||'保存失败')+'</div>';
+    }
+  }catch(e){
+    alertEl.innerHTML='<div class="alert alert-error">请求失败: '+e.message+'</div>';
+  }
+  btn.disabled=false;btn.textContent='保存并应用';
+}
+
+async function loadSystemInfo(){
+  try{
+    var r=await fetch('/api/diagnostics');
+    var d=await r.json();
+    if(d.success&&d.data){
+      document.getElementById('info-agent-ver').textContent=d.data.agent_version||'--';
+      document.getElementById('info-config-ver').textContent='v'+(d.data.applied_config_version||'0');
+      if(d.data.system_info){
+        var s=d.data.system_info;
+        document.getElementById('info-cpu').textContent=s.cpu_temp?s.cpu_temp.toFixed(0)+'°C':'--';
+        document.getElementById('info-mem').textContent=s.mem_used_mb&&s.mem_total_mb?s.mem_used_mb+'/'+s.mem_total_mb+'MB':'--';
+      }
+    }
+  }catch(e){console.log('System info load failed',e)}
+}
+
+loadWanStatus();
+checkNetwork();
+loadSystemInfo();
+</script>
+</body>
+</html>
