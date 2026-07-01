@@ -57,6 +57,14 @@
                 <el-tag v-else type="warning" size="small" class="ml-8">待同步 (applied: v{{ device.applied_config_version }})</el-tag>
               </el-descriptions-item>
               <el-descriptions-item label="Agent 版本">{{ device.agent_version || '-' }}</el-descriptions-item>
+              <el-descriptions-item label="WiFi 架构">
+                <el-tag :type="device.wifi_version >= 2 ? 'success' : ''" size="small">
+                  {{ device.wifi_version >= 2 ? 'v2 (Flat IP)' : 'v1 (VLAN)' }}
+                </el-tag>
+              </el-descriptions-item>
+              <el-descriptions-item label="灰度 Agent" v-if="device.target_agent_version">
+                <el-tag type="warning" size="small">{{ device.target_agent_version }}</el-tag>
+              </el-descriptions-item>
               <el-descriptions-item label="公网 IP">{{ device.wan_ip || '-' }}</el-descriptions-item>
               <el-descriptions-item label="WG IP 1">{{ device.wg_ip_1 || '-' }}</el-descriptions-item>
               <el-descriptions-item label="WG IP 2">{{ device.wg_ip_2 || '-' }}</el-descriptions-item>
@@ -78,7 +86,7 @@
           <el-button type="primary" size="small" @click="openWifiWizard()" :disabled="!device.customer_id">添加账号</el-button>
         </div>
         <el-table :data="wifiAccounts" v-loading="wifiLoading" stripe>
-          <el-table-column prop="vlan_id" label="VLAN" width="70" />
+          <el-table-column prop="vlan_id" label="VLAN" width="70" v-if="device.wifi_version < 2" />
           <el-table-column prop="username" label="用户名" width="130" />
           <el-table-column prop="password" label="密码" width="130" />
           <el-table-column prop="label" label="标签" width="120" />
@@ -146,7 +154,7 @@
             </div>
           </template>
           <el-alert type="info" :closable="false" show-icon style="margin-bottom: 16px">
-            通过 SSH 登录 AP 后运行此脚本，自动完成三频 WiFi、WPA2-EAP 认证、动态 VLAN、WAN SSH 等全部配置。
+            通过 SSH 登录 AP 后运行此脚本，自动完成三频 WiFi、WPA2-EAP 认证、NSS 硬件加速、WAN SSH 等全部配置。
             <span v-if="device?.ap_ip">
               快捷命令: <code style="background: #f0f2f5; padding: 1px 6px; border-radius: 3px; user-select: all">ssh root@{{ device.ap_ip }}</code>
             </span>
@@ -159,13 +167,13 @@
             <el-card shadow="never">
               <template #header><span style="font-weight: 600">配置说明</span></template>
               <div style="font-size: 13px; color: #606266; line-height: 1.8">
-                <p><b>脚本功能:</b></p>
+                <p><b>脚本功能 (v2 Flat IP):</b></p>
                 <ul style="padding-left: 20px; margin: 4px 0 12px">
-                  <li>自动检测所有射频 (2.4G / 5G-low / 5G-high)</li>
+                  <li>自动检测所有射频 (2.4G / 5G / 6G)，含 PCIe 5GHz</li>
                   <li>统一配置 SSID: <code>SunIPIP.com Streaming LAN</code></li>
-                  <li>自动选最高 WiFi 模式 (AX→AC→N)，最大频宽，信道自动</li>
+                  <li>NSS 硬件加速开启 (nss_offload=1)</li>
                   <li>WPA2-EAP 企业级认证 (RADIUS)</li>
-                  <li>动态 VLAN 强制模式 + 802.1Q trunk</li>
+                  <li>Flat IP 模式 (dynamic_vlan=0，无 VLAN 下发)</li>
                   <li>WAN 口 SSH 放行 (方便远程管理)</li>
                 </ul>
                 <p><b>幂等性:</b> 脚本可重复运行，不会产生重复规则。</p>
@@ -182,7 +190,8 @@
                   <code style="background: #f5f7fa; padding: 2px 8px; border-radius: 3px; user-select: all">sunipip_radius_secret</code>
                 </el-descriptions-item>
                 <el-descriptions-item label="认证方式">WPA2-EAP (PEAP)</el-descriptions-item>
-                <el-descriptions-item label="动态 VLAN">mandatory (mode 2)</el-descriptions-item>
+                <el-descriptions-item label="VLAN 模式">v2: disabled (dynamic_vlan=0)</el-descriptions-item>
+                <el-descriptions-item label="NSS 加速">已启用 (nss_offload=1)</el-descriptions-item>
               </el-descriptions>
             </el-card>
           </el-col>
@@ -261,6 +270,10 @@
           <el-select v-model="editForm.bundle_id" clearable placeholder="选择套餐搭配" style="width: 100%">
             <el-option v-for="b in catalogOptions.bundles || []" :key="b.id" :label="b.name" :value="b.id" />
           </el-select>
+        </el-form-item>
+        <el-form-item label="灰度 Agent">
+          <el-input v-model="editForm.target_agent_version" placeholder="指定版本号(如 1.3.0)，留空跟随全局" clearable />
+          <div style="font-size: 12px; color: #94a3b8; margin-top: 2px">设置后此设备心跳将收到该版本号，用于灰度测试新 agent</div>
         </el-form-item>
         <el-form-item label="备注">
           <el-input v-model="editForm.remark" type="textarea" :rows="2" />
@@ -433,7 +446,7 @@
             {{ wifiGuideAccount.password }}
             <el-button size="small" link style="margin-left: 8px" @click="copyText(wifiGuideAccount.password)">复制</el-button>
           </el-descriptions-item>
-          <el-descriptions-item label="VLAN">{{ wifiGuideAccount.vlan_id }}</el-descriptions-item>
+          <el-descriptions-item label="VLAN" v-if="device.wifi_version < 2">{{ wifiGuideAccount.vlan_id }}</el-descriptions-item>
           <el-descriptions-item label="子网">{{ wifiGuideAccount.ip_prefix }}</el-descriptions-item>
           <el-descriptions-item label="代理模式">{{ wifiGuideAccount.proxy_mode === 'proxy' ? '代理' : '直连' }}</el-descriptions-item>
         </el-descriptions>
@@ -528,7 +541,7 @@ const customerLoading = ref(false)
 
 // Edit
 const editVisible = ref(false)
-const editForm = reactive({ serial_number: '', remark: '', router_model_id: null, ap_model_id: null, bundle_id: null })
+const editForm = reactive({ serial_number: '', remark: '', router_model_id: null, ap_model_id: null, bundle_id: null, target_agent_version: '' })
 const catalogOptions = ref({})
 
 // Install token
@@ -544,12 +557,12 @@ const wifiGuideAccount = ref(null)
 const restartDialogVisible = ref(false)
 const restartServiceName = ref('clash')
 
-// AP setup script — synced with scripts/ap-config.sh
+// AP setup script — synced with scripts/ap-config.sh (v2)
 const apSetupScript = computed(() => {
   return `#!/bin/sh
 # ============================================================
-#  SuniPIP AP 一键配置脚本 — ImmortalWrt / OpenWrt
-#  将 AP 配置为 WPA-Enterprise + 动态 VLAN 模式
+#  SuniPIP AP v2 配置脚本 — ImmortalWrt / OpenWrt
+#  Flat IP + NSS 硬件加速 + WPA-Enterprise
 # ============================================================
 set -e
 
@@ -564,25 +577,29 @@ warn() { echo "[WARN]  $*"; }
 
 echo ""
 echo "============================================================"
-echo "  SuniPIP AP 配置脚本"
+echo "  SuniPIP AP v2 配置脚本 (Flat IP + NSS)"
 echo "============================================================"
 echo ""
 
-# ---- 1. 关闭 NSS offload ----
+# ---- 1. 启用 NSS offload (硬件加速) ----
 if [ -f /etc/modules.d/ath11k ]; then
-    echo 'ath11k nss_offload=0 frame_mode=0' > /etc/modules.d/ath11k
-    ok "ath11k nss_offload=0 frame_mode=0"
+    echo 'ath11k nss_offload=1 frame_mode=2' > /etc/modules.d/ath11k
+    ok "ath11k nss_offload=1 frame_mode=2"
     NSS_CHANGED=1
 
-    for mod_file in 51-qca-nss-drv-vlan-mgr 51-qca-nss-drv-bridge-mgr; do
-        if [ -f "/etc/modules.d/\${mod_file}" ]; then
-            echo "# disabled by sunipip" > "/etc/modules.d/\${mod_file}"
-            ok "已禁用 \${mod_file}"
+    for f in 51-qca-nss-drv-vlan-mgr 51-qca-nss-drv-bridge-mgr; do
+        if [ -f "/etc/modules.d/$f" ]; then
+            if grep -q "disabled" "/etc/modules.d/$f" 2>/dev/null; then
+                MOD=$(echo "$f" | sed 's/^[0-9]*-//' | tr '-' '_')
+                echo "$MOD" > "/etc/modules.d/$f"
+                ok "Re-enabled $f"
+            fi
         fi
     done
 
-    mkdir -p /etc/modprobe.d
-    printf 'blacklist qca_nss_vlan\\nblacklist qca_nss_bridge_mgr\\n' > /etc/modprobe.d/sunipip-no-nss-vlan.conf
+    rm -f /etc/modprobe.d/sunipip-no-nss-vlan.conf
+    rm -f /etc/modprobe.d/blacklist-ath11k-pci.conf
+    ok "已移除 v1 NSS 黑名单"
 fi
 
 # ---- 2. 自动检测 RADIUS 服务器 (默认网关) ----
@@ -611,8 +628,8 @@ uci set network.wan.device='br-trunk'
 uci set network.wan.proto='dhcp'
 ok "网络配置完成"
 
-# ---- 4. 无线配置 ----
-log "配置 WPA-Enterprise + 动态 VLAN..."
+# ---- 4. 无线配置 (v2: dynamic_vlan=0) ----
+log "配置 WPA-Enterprise (Flat IP, 无 VLAN)..."
 for radio in radio0 radio1 radio2 radio3; do
     uci -q get "wireless.\${radio}" >/dev/null 2>&1 || continue
     IFACE="default_\${radio}"
@@ -625,7 +642,6 @@ for radio in radio0 radio1 radio2 radio3; do
     uci set "wireless.\${radio}.disabled=0"
     uci set "wireless.\${radio}.country=HK"
 
-    # 检测 PCIe vs SoC
     RADIO_PATH=$(uci -q get "wireless.\${radio}.path" 2>/dev/null || echo "")
     IS_PCIE=0
     echo "$RADIO_PATH" | grep -q "pci" && IS_PCIE=1
@@ -640,20 +656,16 @@ for radio in radio0 radio1 radio2 radio3; do
             ;;
         5g)
             if [ "$IS_PCIE" = "1" ]; then
-                uci set "wireless.\${radio}.disabled=1"
-                warn "\${radio}: PCIe 5GHz 已禁用 (ath11k_pci TX queue leak)"
-                continue
+                uci set "wireless.\${radio}.channel=36"
+                uci set "wireless.\${radio}.htmode=HE160"
+                ok "\${radio}: PCIe 5GHz / HE160 / CH36 (NSS enabled)"
+            else
+                uci set "wireless.\${radio}.channel=149"
+                uci set "wireless.\${radio}.htmode=HE80"
+                ok "\${radio}: SoC 5GHz / HE80 / CH149"
             fi
-            uci set "wireless.\${radio}.channel=149"
-            uci set "wireless.\${radio}.htmode=HE80"
-            ok "\${radio}: 5GHz SoC / HE80 / CH149"
             ;;
         6g)
-            if [ "$IS_PCIE" = "1" ]; then
-                uci set "wireless.\${radio}.disabled=1"
-                warn "\${radio}: PCIe 6GHz 已禁用"
-                continue
-            fi
             uci set "wireless.\${radio}.channel=1"
             uci set "wireless.\${radio}.htmode=HE160"
             ok "\${radio}: 6GHz / HE160"
@@ -670,11 +682,11 @@ for radio in radio0 radio1 radio2 radio3; do
     uci set "wireless.\${IFACE}.auth_server=\${ROUTER_IP}"
     uci set "wireless.\${IFACE}.auth_port=\${RADIUS_PORT}"
     uci set "wireless.\${IFACE}.auth_secret=\${RADIUS_SECRET}"
-    uci set "wireless.\${IFACE}.dynamic_vlan=2"
-    uci set "wireless.\${IFACE}.vlan_tagged_interface=wan"
-    uci set "wireless.\${IFACE}.vlan_naming=1"
+    uci set "wireless.\${IFACE}.dynamic_vlan=0"
+    uci -q delete "wireless.\${IFACE}.vlan_tagged_interface" 2>/dev/null
+    uci -q delete "wireless.\${IFACE}.vlan_naming" 2>/dev/null
     uci set "wireless.\${IFACE}.ieee80211w=1"
-    ok "\${radio}: WPA2-Enterprise + 动态 VLAN"
+    ok "\${radio}: WPA2-Enterprise (Flat IP)"
 done
 
 # ---- 5. 防火墙 ----
@@ -713,10 +725,11 @@ ok "配置已应用"
 
 echo ""
 echo "============================================================"
-echo "  配置完成!"
+echo "  v2 配置完成!"
 echo "  WiFi SSID:     \${SSID}"
 echo "  RADIUS:        \${ROUTER_IP}:\${RADIUS_PORT}"
-echo "  动态 VLAN:     已启用"
+echo "  dynamic_vlan:  0 (Flat IP)"
+echo "  NSS offload:   1 (硬件加速)"
 echo "============================================================"
 
 if [ "\${NSS_CHANGED}" = "1" ]; then
@@ -855,13 +868,15 @@ function initEditForm() {
     router_model_id: device.value.router_model_id || null,
     ap_model_id: device.value.ap_model_id || null,
     bundle_id: device.value.bundle_id || null,
+    target_agent_version: device.value.target_agent_version || '',
   })
 }
 
 async function handleEdit() {
   submitting.value = true
   try {
-    await updateRouterDevice(deviceId, editForm)
+    const payload = { ...editForm, target_agent_version: editForm.target_agent_version || null }
+    await updateRouterDevice(deviceId, payload)
     ElMessage.success('已更新')
     editVisible.value = false
     fetchDevice()
@@ -950,7 +965,7 @@ function subOptionLabel(s) {
 }
 
 async function handleDeleteWifi(row) {
-  await ElMessageBox.confirm(`确认删除 WiFi 账号「${row.username}」？VLAN ${row.vlan_id} 将被回收。`, '确认', { type: 'warning' })
+  await ElMessageBox.confirm(`确认删除 WiFi 账号「${row.username}」？`, '确认', { type: 'warning' })
   try {
     await deleteWifiAccount(row.id)
     ElMessage.success('已删除')
