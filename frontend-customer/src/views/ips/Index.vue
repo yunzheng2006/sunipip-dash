@@ -241,7 +241,7 @@
               v-if="row.active_subscription?.status === 'active'"
               type="warning" link size="small"
               @click="openRenewDialog(row)"
-            >续费</el-button>
+            >{{ row.active_subscription?.is_test ? '转正' : '续费' }}</el-button>
           </template>
         </el-table-column>
       </el-table>
@@ -345,8 +345,8 @@
       </template>
     </el-dialog>
 
-    <!-- 续费弹窗 -->
-    <el-dialog v-model="renewDialogVisible" title="续费" width="400px" :close-on-click-modal="false">
+    <!-- 续费/转正弹窗 -->
+    <el-dialog v-model="renewDialogVisible" :title="renewTarget?.active_subscription?.is_test ? '测试转正' : '续费'" width="400px" :close-on-click-modal="false">
       <div v-if="renewTarget" style="margin-bottom: 16px">
         <div style="font-weight: 500; margin-bottom: 8px">{{ renewTarget.asset_name || renewTarget.ip_address }}</div>
         <div style="font-size: 13px; color: #909399">
@@ -355,7 +355,7 @@
         </div>
       </div>
       <el-form label-width="80px">
-        <el-form-item label="续费时长">
+        <el-form-item :label="renewTarget?.active_subscription?.is_test ? '购买时长' : '续费时长'">
           <el-select v-model="renewDuration" style="width: 100%">
             <el-option v-for="n in 12" :key="n" :label="`${n} 个月`" :value="n" />
           </el-select>
@@ -363,7 +363,7 @@
       </el-form>
       <template #footer>
         <el-button @click="renewDialogVisible = false">取消</el-button>
-        <el-button type="primary" :loading="renewLoading" @click="submitRenew">确认续费</el-button>
+        <el-button type="primary" :loading="renewLoading" @click="submitRenew">{{ renewTarget?.active_subscription?.is_test ? '确认转正' : '确认续费' }}</el-button>
       </template>
     </el-dialog>
 

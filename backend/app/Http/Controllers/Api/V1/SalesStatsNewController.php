@@ -147,6 +147,24 @@ class SalesStatsNewController extends Controller
             })
             ->pluck('subscriptions.id');
 
+        // 1a+: 管理员测试转正（TYPE_DEDUCTION + "测试转正"描述），started_at 保留测试日期，通过交易日期匹配
+        $convertSubIds = DB::table('transactions')
+            ->join('subscriptions', function ($join) {
+                $join->on('transactions.related_id', '=', 'subscriptions.id')
+                    ->where('transactions.related_type', 'App\\Models\\Subscription');
+            })
+            ->whereIn('transactions.customer_id', $customerIds)
+            ->where('transactions.type', Transaction::TYPE_DEDUCTION)
+            ->where('transactions.description', 'like', '测试转正%')
+            ->where('transactions.amount', '<', 0)
+            ->where('transactions.created_at', '>=', $periodStart)
+            ->where('transactions.created_at', '<=', $periodEnd)
+            ->where('subscriptions.is_test', false)
+            ->where(fn($q) => $costSubFilterJoined($q))
+            ->pluck('subscriptions.id');
+
+        $newSubIds = $newSubIds->merge($convertSubIds)->unique();
+
         $activeSubIds = $newSubIds->merge($renewSubIds)->unique();
 
         $ipCountData = [];
@@ -277,6 +295,21 @@ class SalesStatsNewController extends Controller
             ->get();
         foreach ($newCostRows as $row) {
             $newCostData[$row->customer_id] = (float) $row->ip_cost;
+        }
+
+        // 4a+: 管理员测试转正的 sales_cost（started_at 保留测试日期，通过交易日期匹配）
+        if ($convertSubIds->isNotEmpty()) {
+            $convertCostRows = DB::table('subscriptions')
+                ->where(fn($q) => $costCustWhereInShort($q, $customerIds))
+                ->whereIn('id', $convertSubIds)
+                ->where('is_test', false)
+                ->where(fn($q) => $costSubFilter($q))
+                ->select(DB::raw("{$costCustExprShort} as customer_id"), DB::raw("SUM(COALESCE(sales_cost, 0) * {$initialMonthsExpr}) as ip_cost"))
+                ->groupBy(DB::raw($costCustExprShort))
+                ->get();
+            foreach ($convertCostRows as $row) {
+                $newCostData[$row->customer_id] = ($newCostData[$row->customer_id] ?? 0) + (float) $row->ip_cost;
+            }
         }
 
         // 4b. 新开中转成本：cost_price * 月数（仅 active 规则，降级/删除的不算）
@@ -472,6 +505,21 @@ class SalesStatsNewController extends Controller
             ->select('id', 'customer_id', 'transferred_from_customer_id', 'proxy_ip_id', 'hard_cost', 'sales_cost', 'duration', 'unit', 'initial_duration', 'initial_unit')
             ->get();
         $allRelevantSubs = $allRelevantSubs->merge($newSubs);
+
+        // 6a+: 管理员测试转正的硬成本（started_at 保留测试日期，通过 convertSubIds 匹配）
+        if ($convertSubIds->isNotEmpty()) {
+            $existingNewIds = $newSubs->pluck('id')->all();
+            $convertSubs = DB::table('subscriptions')
+                ->where(fn($q) => $costCustWhereInShort($q, $customerIds))
+                ->whereIn('id', $convertSubIds)
+                ->whereNotIn('id', $existingNewIds)
+                ->where('is_test', false)
+                ->where(fn($q) => $costSubFilter($q))
+                ->select('id', 'customer_id', 'transferred_from_customer_id', 'proxy_ip_id', 'hard_cost', 'sales_cost', 'duration', 'unit', 'initial_duration', 'initial_unit')
+                ->get();
+            $newSubs = $newSubs->merge($convertSubs);
+            $allRelevantSubs = $allRelevantSubs->merge($convertSubs);
+        }
 
         // 6b. 续费交易对应的订阅（含 amount=0 线下续费，硬成本也要算）
         // 排除本期新开的订阅（已在 6a 统计），避免重复计算

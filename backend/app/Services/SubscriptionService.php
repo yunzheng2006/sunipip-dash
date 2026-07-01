@@ -300,6 +300,11 @@ class SubscriptionService
             if ($wasTest) {
                 $updateData['is_test'] = false;
                 $updateData['test_reclaim_at'] = null;
+                $testBaseDate = $subscription->started_at ?? now();
+                $updateData['expires_at'] = \App\Support\DurationHelper::addToDate($testBaseDate, $duration, $unit);
+                if (!$skipDeduct && $newPrice > 0) {
+                    $updateData['balance_deducted'] = true;
+                }
             }
 
             $proxyIp = $subscription->proxy_ip_id ? ProxyIp::withTrashed()->find($subscription->proxy_ip_id) : null;
