@@ -2,6 +2,7 @@ package manager
 
 import (
 	"context"
+	"os"
 	"time"
 )
 
@@ -129,6 +130,19 @@ func (m *Manager) detectDrift(ctx context.Context) []string {
 			drifts = append(drifts, "cannot read nftables config: "+err.Error())
 		} else if currentFW == "" {
 			drifts = append(drifts, "nftables config missing")
+		}
+
+		// Check v2 WiFi files (hook script, IP pool, dhcp-hosts)
+		if len(cfg.FreeRadius.Users) > 0 {
+			for _, path := range []string{
+				"/etc/sunipip/radius-dhcp-hook.sh",
+				"/etc/sunipip/user-ip-pool.conf",
+				"/etc/sunipip/dhcp-hosts.conf",
+			} {
+				if _, err := os.Stat(path); os.IsNotExist(err) {
+					drifts = append(drifts, path+" missing")
+				}
+			}
 		}
 	}
 

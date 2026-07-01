@@ -118,11 +118,18 @@ type InterfaceConfig struct {
 	DHCP      DHCPConfig `json:"dhcp"`
 }
 
+// WifiSubnetConfig is the WiFi client subnet served on the trunk interface (v2 flat mode).
+type WifiSubnetConfig struct {
+	IP   string     `json:"ip"`
+	DHCP DHCPConfig `json:"dhcp"`
+}
+
 // TrunkConfig is the trunk interface for VLANs, with optional native VLAN IP and DHCP.
 type TrunkConfig struct {
-	Interface string     `json:"interface"`
-	IP        string     `json:"ip,omitempty"`
-	DHCP      DHCPConfig `json:"dhcp,omitempty"`
+	Interface  string            `json:"interface"`
+	IP         string            `json:"ip,omitempty"`
+	DHCP       DHCPConfig        `json:"dhcp,omitempty"`
+	WifiSubnet *WifiSubnetConfig `json:"wifi_subnet,omitempty"`
 }
 
 // DHCPConfig is per-interface DHCP configuration.
@@ -156,13 +163,14 @@ type RadiusClient struct {
 	Secret string `json:"secret"`
 }
 
-// RadiusUser is a RADIUS user with VLAN assignment.
+// RadiusUser is a RADIUS user with VLAN assignment and IP allocation.
 type RadiusUser struct {
-	Username   string `json:"username"`
-	Password   string `json:"password"`
-	VLANID     int    `json:"vlan_id"`
-	Label      string `json:"label"`
-	MaxDevices int    `json:"max_devices"`
+	Username     string   `json:"username"`
+	Password     string   `json:"password"`
+	VLANID       int      `json:"vlan_id"`
+	Label        string   `json:"label"`
+	MaxDevices   int      `json:"max_devices"`
+	AllocatedIPs []string `json:"allocated_ips,omitempty"`
 }
 
 // ClashConfig contains Clash proxy configuration.

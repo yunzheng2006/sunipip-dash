@@ -66,6 +66,13 @@ func (s *NetworkService) Apply(ctx context.Context, cfg api.NetworkConfig) error
 		}
 	}
 
+	// v2 flat mode: add WiFi subnet as secondary IP on trunk (no VLAN needed)
+	if cfg.Trunk.WifiSubnet != nil && cfg.Trunk.WifiSubnet.IP != "" {
+		if err := s.ensureSecondaryIP(ctx, cfg.Trunk.Interface, cfg.Trunk.WifiSubnet.IP); err != nil {
+			s.logger.Warn("Failed to set WiFi subnet IP on trunk", "error", err)
+		}
+	}
+
 	// Ensure management interface IP
 	if cfg.Management.IP != "" {
 		if err := s.ensureInterfaceIP(ctx, cfg.Management.Interface, cfg.Management.IP); err != nil {
@@ -193,6 +200,24 @@ func (s *NetworkService) ensureVLAN(ctx context.Context, trunkIface string, vlan
 		return fmt.Errorf("bring up %s: %w", vlan.Bridge, err)
 	}
 
+	return nil
+}
+
+// ensureSecondaryIP adds an IP to an interface without flushing existing IPs.
+func (s *NetworkService) ensureSecondaryIP(ctx context.Context, iface, ip string) error {
+	currentIPs, _ := s.getInterfaceIPs(ctx, iface)
+	for _, cur := range currentIPs {
+		if cur == ip {
+			return nil
+		}
+	}
+	if err := runCmd(ctx, "ip", "addr", "add", ip, "dev", iface); err != nil {
+		if strings.Contains(err.Error(), "RTNETLINK answers: File exists") {
+			return nil
+		}
+		return fmt.Errorf("add secondary IP %s to %s: %w", ip, iface, err)
+	}
+	s.logger.Info("Added WiFi subnet secondary IP", "interface", iface, "ip", ip)
 	return nil
 }
 

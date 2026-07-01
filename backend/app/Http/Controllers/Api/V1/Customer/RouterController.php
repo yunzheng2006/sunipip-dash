@@ -120,12 +120,12 @@ class RouterController extends Controller
             ->firstOrFail();
 
         $data = $request->validate([
-            'username' => 'nullable|string|max:64',
+            'username' => 'nullable|string|max:64|regex:/^[a-zA-Z0-9_-]+$/',
             'password' => 'nullable|string|max:128',
             'label' => 'nullable|string|max:100',
             'proxy_subscription_id' => 'nullable|integer',
             'proxy_mode' => 'nullable|string|in:proxy,direct',
-            'max_devices' => 'nullable|integer|min:1|max:50',
+            'max_devices' => 'nullable|integer|min:1|max:10',
         ]);
 
         if (!empty($data['proxy_subscription_id'])) {
@@ -166,7 +166,7 @@ class RouterController extends Controller
             'proxy_subscription_id' => 'nullable|integer',
             'proxy_mode' => 'nullable|string|in:proxy,direct',
             'is_active' => 'nullable|boolean',
-            'max_devices' => 'nullable|integer|min:1|max:50',
+            'max_devices' => 'nullable|integer|min:1|max:10',
         ]);
 
         if (!empty($data['proxy_subscription_id'])) {

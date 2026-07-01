@@ -11,7 +11,7 @@ class RouterWifiAccount extends Model
         'router_device_id', 'username', 'password', 'label',
         'vlan_id', 'ip_prefix', 'gateway_ip',
         'proxy_subscription_id', 'proxy_mode',
-        'is_active', 'max_devices',
+        'is_active', 'max_devices', 'ip_start_index',
     ];
 
     protected function casts(): array
@@ -20,6 +20,7 @@ class RouterWifiAccount extends Model
             'vlan_id' => 'integer',
             'is_active' => 'integer',
             'max_devices' => 'integer',
+            'ip_start_index' => 'integer',
         ];
     }
 
@@ -31,6 +32,19 @@ class RouterWifiAccount extends Model
     public function subscription(): BelongsTo
     {
         return $this->belongsTo(Subscription::class, 'proxy_subscription_id');
+    }
+
+    public function getAllocatedIps(): array
+    {
+        if ($this->ip_start_index < 2) {
+            return [];
+        }
+        $ips = [];
+        for ($i = 0; $i < $this->max_devices; $i++) {
+            $idx = $this->ip_start_index + $i;
+            $ips[] = long2ip(ip2long('10.10.0.0') + $idx);
+        }
+        return $ips;
     }
 
     public function getSocks5String(): ?string

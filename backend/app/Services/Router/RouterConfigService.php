@@ -30,30 +30,59 @@ class RouterConfigService
 
     public function buildNetworkConfig(RouterDevice $device): array
     {
+        $isV2 = ($device->wifi_version ?? 1) >= 2;
+
+        $trunk = [
+            'interface' => 'eth2',
+            'ip' => '10.20.0.1/24',
+            'dhcp' => [
+                'range_start' => '10.20.0.100',
+                'range_end' => '10.20.0.200',
+                'lease' => '1m',
+                'gateway' => '10.20.0.1',
+                'dns' => '10.20.0.1',
+            ],
+        ];
+
         $vlans = [];
-        foreach ($device->wifiAccounts()->where('is_active', 1)->get() as $account) {
-            $prefix = $account->ip_prefix;
-            $gw = $account->gateway_ip;
-            $vlanId = $account->vlan_id;
 
-            $baseIp = explode('/', $prefix)[0];
-            $parts = explode('.', $baseIp);
-            $dhcpStart = $parts[0] . '.' . $parts[1] . '.' . $parts[2] . '.2';
-            $dhcpEnd = $parts[0] . '.' . $parts[1] . '.' . $parts[2] . '.6';
+        if ($isV2) {
+            $hasActiveAccounts = $device->wifiAccounts()->where('is_active', 1)->exists();
+            if ($hasActiveAccounts) {
+                $trunk['wifi_subnet'] = [
+                    'ip' => '10.10.0.1/16',
+                    'dhcp' => [
+                        'lease' => '1h',
+                        'gateway' => '10.10.0.1',
+                        'dns' => '10.10.0.1',
+                    ],
+                ];
+            }
+        } else {
+            foreach ($device->wifiAccounts()->where('is_active', 1)->get() as $account) {
+                $prefix = $account->ip_prefix;
+                $gw = $account->gateway_ip;
+                $vlanId = $account->vlan_id;
 
-            $vlans[] = [
-                'vlan_id' => $vlanId,
-                'interface' => "eth2.{$vlanId}",
-                'bridge' => "br-vlan{$vlanId}",
-                'ip' => str_replace('.0/', ".1/", $prefix),
-                'dhcp' => [
-                    'range_start' => $dhcpStart,
-                    'range_end' => $dhcpEnd,
-                    'lease' => '1m',
-                    'gateway' => $gw,
-                    'dns' => $gw,
-                ],
-            ];
+                $baseIp = explode('/', $prefix)[0];
+                $parts = explode('.', $baseIp);
+                $dhcpStart = $parts[0] . '.' . $parts[1] . '.' . $parts[2] . '.2';
+                $dhcpEnd = $parts[0] . '.' . $parts[1] . '.' . $parts[2] . '.6';
+
+                $vlans[] = [
+                    'vlan_id' => $vlanId,
+                    'interface' => "eth2.{$vlanId}",
+                    'bridge' => "br-vlan{$vlanId}",
+                    'ip' => str_replace('.0/', ".1/", $prefix),
+                    'dhcp' => [
+                        'range_start' => $dhcpStart,
+                        'range_end' => $dhcpEnd,
+                        'lease' => '1m',
+                        'gateway' => $gw,
+                        'dns' => $gw,
+                    ],
+                ];
+            }
         }
 
         return [
@@ -80,32 +109,30 @@ class RouterConfigService
                     'dns' => '100.64.1.1',
                 ],
             ],
-            'trunk' => [
-                'interface' => 'eth2',
-                'ip' => '10.20.0.1/24',
-                'dhcp' => [
-                    'range_start' => '10.20.0.100',
-                    'range_end' => '10.20.0.200',
-                    'lease' => '1m',
-                    'gateway' => '10.20.0.1',
-                    'dns' => '10.20.0.1',
-                ],
-            ],
+            'trunk' => $trunk,
             'vlans' => $vlans,
         ];
     }
 
     public function buildFreeRadiusConfig(RouterDevice $device): array
     {
+        $isV2 = ($device->wifi_version ?? 1) >= 2;
         $users = [];
+
         foreach ($device->wifiAccounts()->where('is_active', 1)->get() as $account) {
-            $users[] = [
+            $user = [
                 'username' => $account->username,
                 'password' => $account->password,
                 'vlan_id' => $account->vlan_id,
                 'label' => $account->label,
                 'max_devices' => $account->max_devices,
             ];
+
+            if ($isV2) {
+                $user['allocated_ips'] = $account->getAllocatedIps();
+            }
+
+            $users[] = $user;
         }
 
         return [
@@ -133,7 +160,7 @@ class RouterConfigService
                 continue;
             }
 
-            $proxyName = "proxy-vlan-{$account->vlan_id}";
+            $proxyName = "proxy-{$account->username}";
             $proxies[] = [
                 'name' => $proxyName,
                 'type' => 'socks5',
@@ -144,11 +171,13 @@ class RouterConfigService
             ];
             $proxyNames[] = $proxyName;
 
-            $rules[] = [
-                'type' => 'SRC-IP-CIDR',
-                'value' => $account->ip_prefix,
-                'proxy' => $proxyName,
-            ];
+            foreach ($account->getAllocatedIps() as $ip) {
+                $rules[] = [
+                    'type' => 'SRC-IP-CIDR',
+                    'value' => "{$ip}/32",
+                    'proxy' => $proxyName,
+                ];
+            }
         }
 
         $proxyGroups = [];

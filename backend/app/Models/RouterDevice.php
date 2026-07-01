@@ -16,11 +16,12 @@ class RouterDevice extends Model
         'router_model_id', 'ap_model_id', 'bundle_id',
         'customer_id', 'bound_module', 'bound_at',
         'status', 'install_token', 'install_token_expires_at',
-        'agent_key', 'agent_version', 'wan_ip',
+        'agent_key', 'agent_version', 'target_agent_version', 'wan_ip',
         'wg_ip_1', 'wg_ip_2', 'wg_server_1_id', 'wg_server_2_id',
         'config_version', 'applied_config_version',
         'last_heartbeat_at', 'last_heartbeat_ip', 'system_info',
-        'ap_management_enabled', 'ap_ip', 'ap_config', 'ap_discovery', 'ap_discover_requested', 'remark',
+        'ap_management_enabled', 'ap_ip', 'ap_config', 'ap_discovery', 'ap_discover_requested',
+        'wifi_ip_next_index', 'wifi_version', 'remark',
     ];
 
     protected $hidden = ['agent_key', 'install_token'];
@@ -38,6 +39,8 @@ class RouterDevice extends Model
             'ap_config' => 'array',
             'ap_discovery' => 'array',
             'ap_discover_requested' => 'boolean',
+            'wifi_ip_next_index' => 'integer',
+            'wifi_version' => 'integer',
         ];
     }
 

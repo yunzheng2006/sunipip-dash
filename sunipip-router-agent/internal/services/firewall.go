@@ -84,7 +84,6 @@ func (s *FirewallService) generateConfig(cfg api.NetworkConfig) string {
 	b.WriteString(fmt.Sprintf("        iifname \"%s\" return\n", cfg.Management.Interface))
 	b.WriteString(fmt.Sprintf("        iifname \"%s\" return\n", cfg.Wired.Interface))
 	b.WriteString(fmt.Sprintf("        iifname \"%s\" return\n", cfg.WAN.Interface))
-	b.WriteString(fmt.Sprintf("        iifname \"%s\" return\n", cfg.Trunk.Interface))
 	b.WriteString("        iif \"lo\" return\n")
 	b.WriteString("        iifname \"wg*\" return\n\n")
 
@@ -98,15 +97,21 @@ func (s *FirewallService) generateConfig(cfg api.NetworkConfig) string {
 	b.WriteString("        ip daddr 255.255.255.255 return\n")
 	b.WriteString("        udp dport { 67, 68 } return\n\n")
 
+	// v2: WiFi clients arrive on trunk with 10.10.x.x source IPs (no VLAN bridge)
+	// Also keep br-vlan* match for backward compat during migration
+	b.WriteString(fmt.Sprintf("        iifname \"%s\" ip saddr 10.10.0.0/16 meta l4proto tcp tproxy to 127.0.0.1:7893 meta mark set 0x1 accept\n", cfg.Trunk.Interface))
+	b.WriteString(fmt.Sprintf("        iifname \"%s\" ip saddr 10.10.0.0/16 meta l4proto udp tproxy to 127.0.0.1:7893 meta mark set 0x1 accept\n", cfg.Trunk.Interface))
 	b.WriteString("        iifname \"br-vlan*\" meta l4proto tcp tproxy to 127.0.0.1:7893 meta mark set 0x1 accept\n")
 	b.WriteString("        iifname \"br-vlan*\" meta l4proto udp tproxy to 127.0.0.1:7893 meta mark set 0x1 accept\n")
 	b.WriteString("    }\n")
 	b.WriteString("}\n\n")
 
-	// DNS redirect — VLAN clients use Clash fake-ip DNS
+	// DNS redirect — WiFi clients use Clash fake-ip DNS
 	b.WriteString("table ip nat {\n")
 	b.WriteString("    chain clash-dns {\n")
 	b.WriteString("        type nat hook prerouting priority dstnat; policy accept;\n\n")
+	b.WriteString(fmt.Sprintf("        iifname \"%s\" ip saddr 10.10.0.0/16 udp dport 53 redirect to :1053\n", cfg.Trunk.Interface))
+	b.WriteString(fmt.Sprintf("        iifname \"%s\" ip saddr 10.10.0.0/16 tcp dport 53 redirect to :1053\n", cfg.Trunk.Interface))
 	b.WriteString("        iifname \"br-vlan*\" udp dport 53 redirect to :1053\n")
 	b.WriteString("        iifname \"br-vlan*\" tcp dport 53 redirect to :1053\n")
 	b.WriteString("    }\n")

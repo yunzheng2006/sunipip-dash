@@ -125,6 +125,7 @@ class RouterDeviceController extends Controller
             'bundle_id' => 'nullable|integer|exists:router_bundles,id',
             'ap_management_enabled' => 'nullable|boolean',
             'ap_ip' => 'nullable|string|max:45',
+            'target_agent_version' => 'nullable|string|max:30',
         ]);
 
         $routerDevice->update($data);
@@ -248,12 +249,12 @@ class RouterDeviceController extends Controller
         }
 
         $data = $request->validate([
-            'username' => 'nullable|string|max:64',
+            'username' => 'nullable|string|max:64|regex:/^[a-zA-Z0-9_-]+$/',
             'password' => 'nullable|string|max:128',
             'label' => 'nullable|string|max:100',
             'proxy_subscription_id' => 'nullable|integer|exists:subscriptions,id',
             'proxy_mode' => 'nullable|string|in:proxy,direct',
-            'max_devices' => 'nullable|integer|min:1|max:5',
+            'max_devices' => 'nullable|integer|min:1|max:50',
         ]);
 
         try {

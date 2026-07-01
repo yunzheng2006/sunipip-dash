@@ -6,6 +6,7 @@ use App\Models\RouterDevice;
 use App\Models\RouterEventLog;
 use App\Models\RouterWifiAccount;
 use App\Models\Subscription;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 
 class RouterWifiService
@@ -16,20 +17,22 @@ class RouterWifiService
 
     public function createWifiAccount(RouterDevice $device, array $data): RouterWifiAccount
     {
-        $vlanInfo = $this->allocateVlanAndPrefix($device);
+        $maxDevices = $data['max_devices'] ?? 5;
+        $ipInfo = $this->allocateIpRange($device, $maxDevices);
 
         $account = RouterWifiAccount::create([
             'router_device_id' => $device->id,
             'username' => $data['username'] ?? 'wifi-' . Str::lower(Str::random(4)),
             'password' => $data['password'] ?? Str::random(12),
             'label' => $data['label'] ?? null,
-            'vlan_id' => $vlanInfo['vlan_id'],
-            'ip_prefix' => $vlanInfo['ip_prefix'],
-            'gateway_ip' => $vlanInfo['gateway_ip'],
+            'vlan_id' => $ipInfo['vlan_id'],
+            'ip_prefix' => $ipInfo['ip_prefix'],
+            'gateway_ip' => $ipInfo['gateway_ip'],
+            'ip_start_index' => $ipInfo['ip_start_index'],
             'proxy_subscription_id' => $data['proxy_subscription_id'] ?? null,
             'proxy_mode' => $data['proxy_mode'] ?? 'proxy',
             'is_active' => 1,
-            'max_devices' => $data['max_devices'] ?? 5,
+            'max_devices' => $maxDevices,
         ]);
 
         $this->configService->pushConfig($device);
@@ -72,8 +75,8 @@ class RouterWifiService
             $updates['is_active'] = $data['is_active'];
         }
 
-        if (isset($data['max_devices'])) {
-            $updates['max_devices'] = $data['max_devices'];
+        if (isset($data['max_devices']) && $data['max_devices'] != $account->max_devices) {
+            throw new \RuntimeException('设备数上限创建后不可修改，请删除账号重新创建');
         }
 
         if (!empty($updates)) {
@@ -92,6 +95,11 @@ class RouterWifiService
 
         $account->delete();
 
+        // Reclaim IP pool when all accounts are deleted
+        if ($device->wifiAccounts()->count() === 0) {
+            $device->update(['wifi_ip_next_index' => 2]);
+        }
+
         $this->configService->pushConfig($device);
 
         RouterEventLog::create([
@@ -103,27 +111,27 @@ class RouterWifiService
         ]);
     }
 
-    public function allocateVlanAndPrefix(RouterDevice $device): array
+    public function allocateIpRange(RouterDevice $device, int $maxDevices): array
     {
-        $usedVlans = $device->wifiAccounts()->pluck('vlan_id')->toArray();
+        return DB::transaction(function () use ($device, $maxDevices) {
+            $locked = RouterDevice::where('id', $device->id)->lockForUpdate()->first();
+            $startIndex = $locked->wifi_ip_next_index ?? 2;
 
-        $vlanId = 10;
-        while (in_array($vlanId, $usedVlans) && $vlanId <= 200) {
-            $vlanId++;
-        }
+            if ($startIndex + $maxDevices > 65534) {
+                throw new \RuntimeException('IP 地址池已用尽');
+            }
 
-        if ($vlanId > 200) {
-            throw new \RuntimeException('VLAN 已用尽（最大 200）');
-        }
+            $locked->update(['wifi_ip_next_index' => $startIndex + $maxDevices]);
 
-        $ipPrefix = "10.10.{$vlanId}.0/29";
-        $gatewayIp = "10.10.{$vlanId}.1";
+            $firstIp = long2ip(ip2long('10.10.0.0') + $startIndex);
 
-        return [
-            'vlan_id' => $vlanId,
-            'ip_prefix' => $ipPrefix,
-            'gateway_ip' => $gatewayIp,
-        ];
+            return [
+                'vlan_id' => 10,
+                'ip_prefix' => "{$firstIp}/32",
+                'gateway_ip' => '10.10.0.1',
+                'ip_start_index' => $startIndex,
+            ];
+        });
     }
 
     public function linkSubscription(RouterWifiAccount $account, Subscription $subscription): void

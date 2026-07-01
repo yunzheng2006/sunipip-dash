@@ -6,7 +6,10 @@ use App\Http\Controllers\Controller;
 use App\Models\RouterConfigSnapshot;
 use App\Models\RouterDevice;
 use App\Models\RouterEventLog;
+use App\Models\RouterRemoteCommand;
+use App\Services\Router\RouterConfigService;
 use App\Services\Router\RouterProvisionService;
+use App\Services\Router\RouterWifiService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 
@@ -870,8 +873,12 @@ BASH;
         if (isset($data['system_info'])) {
             $updates['system_info'] = $data['system_info'];
         }
+        $oldAgentVersion = $device->agent_version;
         if (isset($data['agent_version'])) {
             $updates['agent_version'] = $data['agent_version'];
+            if ($device->target_agent_version && $data['agent_version'] === $device->target_agent_version) {
+                $updates['target_agent_version'] = null;
+            }
         }
         if (isset($data['wan_ip'])) {
             $updates['wan_ip'] = $data['wan_ip'];
@@ -886,7 +893,15 @@ BASH;
 
         $device->update($updates);
 
-        $latestVersion = $this->getLatestAgentVersion();
+        // Auto-migrate to v2 when agent binary version changes and device is still v1
+        $newAgentVersion = $data['agent_version'] ?? $oldAgentVersion;
+        if ($oldAgentVersion && $newAgentVersion !== $oldAgentVersion && ($device->wifi_version ?? 1) < 2) {
+            $this->autoMigrateToV2($device);
+        }
+
+        // target_agent_version overrides global version.txt (grayscale channel)
+        $globalVersion = $this->getLatestAgentVersion();
+        $latestVersion = $device->fresh()->target_agent_version ?: $globalVersion;
         $platformUrl = rtrim(config('app.url'), '/');
 
         $hasPending = $device->config_version > ($data['applied_config_version'] ?? $device->applied_config_version);
@@ -1091,6 +1106,120 @@ BASH;
         return response()->download($binaryPath, 'sunipip-router-agent', [
             'Content-Type' => 'application/octet-stream',
         ]);
+    }
+
+    private function autoMigrateToV2(RouterDevice $device): void
+    {
+        try {
+            $wifiService = app(RouterWifiService::class);
+            $configService = app(RouterConfigService::class);
+
+            // Allocate IP ranges for existing accounts without IPs
+            $accounts = $device->wifiAccounts()->where('ip_start_index', 0)->get();
+            foreach ($accounts as $account) {
+                $device->refresh();
+                $ipInfo = $wifiService->allocateIpRange($device, $account->max_devices);
+                $account->update([
+                    'ip_start_index' => $ipInfo['ip_start_index'],
+                    'vlan_id' => $ipInfo['vlan_id'],
+                    'ip_prefix' => $ipInfo['ip_prefix'],
+                    'gateway_ip' => $ipInfo['gateway_ip'],
+                ]);
+            }
+
+            // Push AP v2 config via remote command (if AP IP is set, and no pending AP command)
+            $hasApCommand = RouterRemoteCommand::where('router_device_id', $device->id)
+                ->whereIn('status', ['pending', 'sent'])
+                ->where('command', 'like', '%ap-v2.sh%')
+                ->exists();
+            if ($device->ap_ip && !$hasApCommand) {
+                $apConfig = $device->ap_config ?? [];
+                $apUser = $apConfig['ap_username'] ?? 'root';
+                $apPass = $apConfig['ap_password'] ?? '';
+
+                $sshPrefix = $apPass
+                    ? sprintf('sshpass -p %s ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 %s@%s',
+                        escapeshellarg($apPass), escapeshellarg($apUser), escapeshellarg($device->ap_ip))
+                    : sprintf('ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 %s@%s',
+                        escapeshellarg($apUser), escapeshellarg($device->ap_ip));
+
+                $apScript = $this->buildApV2Script();
+                $b64 = base64_encode($apScript);
+                $command = sprintf(
+                    'echo %s | base64 -d | %s "cat > /tmp/ap-v2.sh && sh /tmp/ap-v2.sh; rm -f /tmp/ap-v2.sh"',
+                    escapeshellarg($b64), $sshPrefix
+                );
+
+                RouterRemoteCommand::create([
+                    'router_device_id' => $device->id,
+                    'command' => $command,
+                    'timeout' => 120,
+                    'status' => 'pending',
+                ]);
+            }
+
+            // Mark as v2 and push config
+            $device->update(['wifi_version' => 2]);
+            $configService->pushConfig($device);
+
+            RouterEventLog::create([
+                'router_device_id' => $device->id,
+                'event_type' => 'auto_migrate_v2',
+                'severity' => 'info',
+                'message' => 'Auto-migrated to WiFi v2 after agent update',
+                'metadata' => [
+                    'accounts_migrated' => $accounts->count(),
+                    'ap_command_queued' => !empty($device->ap_ip),
+                ],
+            ]);
+        } catch (\Throwable $e) {
+            RouterEventLog::create([
+                'router_device_id' => $device->id,
+                'event_type' => 'auto_migrate_v2_failed',
+                'severity' => 'error',
+                'message' => 'Auto-migration to v2 failed: ' . $e->getMessage(),
+            ]);
+        }
+    }
+
+    private function buildApV2Script(): string
+    {
+        return <<<'SH'
+#!/bin/sh
+for radio in radio0 radio1 radio2 radio3; do
+    uci -q get "wireless.${radio}" >/dev/null 2>&1 || continue
+    IFACE="default_${radio}"
+    uci set "wireless.${radio}.disabled=0"
+    BAND=$(uci -q get "wireless.${radio}.band" 2>/dev/null)
+    RPATH=$(uci -q get "wireless.${radio}.path" 2>/dev/null)
+    case "$BAND" in
+        2g) uci set "wireless.${radio}.channel=6"; uci set "wireless.${radio}.htmode=HE40" ;;
+        5g)
+            if echo "$RPATH" | grep -q "pci"; then
+                uci set "wireless.${radio}.channel=36"; uci set "wireless.${radio}.htmode=HE160"
+            else
+                uci set "wireless.${radio}.channel=149"; uci set "wireless.${radio}.htmode=HE80"
+            fi ;;
+        6g) uci set "wireless.${radio}.channel=1"; uci set "wireless.${radio}.htmode=HE160" ;;
+    esac
+    if uci -q get "wireless.${IFACE}" >/dev/null 2>&1; then
+        uci set "wireless.${IFACE}.dynamic_vlan=0"
+        uci -q delete "wireless.${IFACE}.vlan_tagged_interface" 2>/dev/null
+        uci -q delete "wireless.${IFACE}.vlan_naming" 2>/dev/null
+    fi
+done
+[ -f /etc/modules.d/ath11k ] && echo 'ath11k nss_offload=1 frame_mode=2' > /etc/modules.d/ath11k
+for f in 51-qca-nss-drv-vlan-mgr 51-qca-nss-drv-bridge-mgr; do
+    [ -f "/etc/modules.d/$f" ] && echo "$(echo "$f" | sed 's/^[0-9]*-//' | tr '-' '_')" > "/etc/modules.d/$f"
+done
+rm -f /etc/modprobe.d/sunipip-no-nss-vlan.conf /etc/modprobe.d/blacklist-ath11k-pci.conf
+# Replace v1 watchdog with v2
+rm -f /usr/bin/radius_watchdog.sh
+crontab -l 2>/dev/null | grep -v "radius_watchdog" | crontab - 2>/dev/null
+uci commit wireless
+nohup sh -c 'sleep 5 && reboot' >/dev/null 2>&1 &
+echo "V2_MIGRATION_DONE"
+SH;
     }
 
     private function getLatestAgentVersion(): ?string
