@@ -282,9 +282,9 @@ class SalesStatsNewController extends Controller
             $newFwdCostData[$row->customer_id] = (float) $row->fwd_cost;
         }
 
-        // 4c. 续费 IP 成本：sales_cost * 续费月数（用交易金额/订阅价格推算）
+        // 4c. 续费 IP 成本：先按订阅聚合交易金额再算月数，避免逐笔 round 误差
         $renewCostData = [];
-        $renewCostRows = DB::table('transactions')
+        $renewCostSub = DB::table('transactions')
             ->join('subscriptions', function ($join) {
                 $join->on('transactions.related_id', '=', 'subscriptions.id')
                     ->where('transactions.related_type', 'App\\Models\\Subscription');
@@ -298,18 +298,24 @@ class SalesStatsNewController extends Controller
             ->where(fn($q) => $costSubFilterJoined($q))
             ->where(fn($q) => $q->where('subscriptions.started_at', '<', $periodStart)->orWhereNull('subscriptions.started_at'))
             ->select(
-                'transactions.customer_id',
-                DB::raw("SUM(COALESCE(subscriptions.sales_cost, 0) * {$renewMonthsExpr}) as ip_cost")
+                'subscriptions.customer_id',
+                'subscriptions.id as sub_id',
+                DB::raw("COALESCE(subscriptions.sales_cost, 0) as sales_cost"),
+                DB::raw("GREATEST(ROUND(SUM(ABS(transactions.amount)) * {$monthsExpr} / NULLIF(subscriptions.price, 0)), 1) as renew_months")
             )
-            ->groupBy('transactions.customer_id')
+            ->groupBy('subscriptions.customer_id', 'subscriptions.id', 'subscriptions.sales_cost', 'subscriptions.duration', 'subscriptions.unit', 'subscriptions.price');
+        $renewCostRows = DB::table(DB::raw("({$renewCostSub->toSql()}) as per_sub"))
+            ->mergeBindings($renewCostSub)
+            ->select('customer_id', DB::raw('SUM(sales_cost * renew_months) as ip_cost'))
+            ->groupBy('customer_id')
             ->get();
         foreach ($renewCostRows as $row) {
             $renewCostData[$row->customer_id] = (float) $row->ip_cost;
         }
 
-        // 4d. 续费中转成本（仅 active 规则，降级/删除的不算）
+        // 4d. 续费中转成本（仅 active 规则，先按订阅聚合交易金额再算月数）
         $renewFwdCostData = [];
-        $renewFwdCostRows = DB::table('transactions')
+        $renewFwdCostSub = DB::table('transactions')
             ->join('subscriptions', function ($join) {
                 $join->on('transactions.related_id', '=', 'subscriptions.id')
                     ->where('transactions.related_type', 'App\\Models\\Subscription');
@@ -328,10 +334,16 @@ class SalesStatsNewController extends Controller
             ->where(fn($q) => $costSubFilterJoined($q))
             ->where(fn($q) => $q->where('subscriptions.started_at', '<', $periodStart)->orWhereNull('subscriptions.started_at'))
             ->select(
-                'transactions.customer_id',
-                DB::raw("SUM(COALESCE(forward_plans.cost_price, 0) * {$renewMonthsExpr}) as fwd_cost")
+                'subscriptions.customer_id',
+                'subscriptions.id as sub_id',
+                DB::raw("COALESCE(forward_plans.cost_price, 0) as fwd_cost_price"),
+                DB::raw("GREATEST(ROUND(SUM(ABS(transactions.amount)) * {$monthsExpr} / NULLIF(subscriptions.price, 0)), 1) as renew_months")
             )
-            ->groupBy('transactions.customer_id')
+            ->groupBy('subscriptions.customer_id', 'subscriptions.id', 'forward_plans.cost_price', 'subscriptions.duration', 'subscriptions.unit', 'subscriptions.price');
+        $renewFwdCostRows = DB::table(DB::raw("({$renewFwdCostSub->toSql()}) as per_sub"))
+            ->mergeBindings($renewFwdCostSub)
+            ->select('customer_id', DB::raw('SUM(fwd_cost_price * renew_months) as fwd_cost'))
+            ->groupBy('customer_id')
             ->get();
         foreach ($renewFwdCostRows as $row) {
             $renewFwdCostData[$row->customer_id] = (float) $row->fwd_cost;
@@ -533,16 +545,29 @@ class SalesStatsNewController extends Controller
             $newIpHardCostData[$sub->customer_id] = ($newIpHardCostData[$sub->customer_id] ?? 0) + round($cost * $months, 4);
         }
 
-        // 6b 计算：续费 IP 硬成本
+        // 6b 计算：续费 IP 硬成本（先按订阅聚合交易金额再算月数）
         $renewIpHardCostData = [];
+        $renewBySubId = [];
         foreach ($renewSubRows as $row) {
+            $sid = $row->id;
+            if (!isset($renewBySubId[$sid])) {
+                $renewBySubId[$sid] = (object) [
+                    'id' => $row->id, 'customer_id' => $row->customer_id,
+                    'proxy_ip_id' => $row->proxy_ip_id, 'hard_cost' => $row->hard_cost,
+                    'sales_cost' => $row->sales_cost, 'duration' => $row->duration,
+                    'unit' => $row->unit, 'price' => $row->price, 'total_txn' => 0,
+                ];
+            }
+            $renewBySubId[$sid]->total_txn += (float) $row->txn_amount;
+        }
+        foreach ($renewBySubId as $row) {
             $cost = $resolveIpHardCost($row);
             $durationMonths = max(\App\Support\DurationHelper::toMonths($row->duration ?: 1, $row->unit ?: 3), 1);
-            if ((float) $row->txn_amount == 0) {
+            if ($row->total_txn == 0) {
                 $renewMonths = $durationMonths;
             } else {
                 $monthlyPrice = (float) $row->price > 0 ? (float) $row->price / $durationMonths : 0;
-                $renewMonths = $monthlyPrice > 0 ? min(max(round((float) $row->txn_amount / $monthlyPrice), 1), $durationMonths) : $durationMonths;
+                $renewMonths = $monthlyPrice > 0 ? max(round($row->total_txn / $monthlyPrice), 1) : $durationMonths;
             }
             $renewIpHardCostData[$row->customer_id] = ($renewIpHardCostData[$row->customer_id] ?? 0) + round($cost * $renewMonths, 4);
         }
@@ -567,10 +592,8 @@ class SalesStatsNewController extends Controller
             $newFwdHardCostData[$row->customer_id] = (float) $row->fwd_cost;
         }
 
-        $hardRenewMonthsExpr = $renewMonthsExpr;
-
         $renewFwdHardCostData = [];
-        $renewFwdHardCostRows = DB::table('transactions')
+        $renewFwdHardCostSub = DB::table('transactions')
             ->join('subscriptions', function ($join) {
                 $join->on('transactions.related_id', '=', 'subscriptions.id')
                     ->where('transactions.related_type', 'App\\Models\\Subscription');
@@ -589,10 +612,16 @@ class SalesStatsNewController extends Controller
             ->where(fn($q) => $costSubFilterJoined($q))
             ->where(fn($q) => $q->where('subscriptions.started_at', '<', $periodStart)->orWhereNull('subscriptions.started_at'))
             ->select(
-                'transactions.customer_id',
-                DB::raw("SUM({$fwdHardExpr} * {$hardRenewMonthsExpr}) as fwd_cost")
+                'subscriptions.customer_id',
+                'subscriptions.id as sub_id',
+                DB::raw("{$fwdHardExpr} as fwd_unit_cost"),
+                DB::raw("GREATEST(ROUND(SUM(ABS(transactions.amount)) * {$monthsExpr} / NULLIF(subscriptions.price, 0)), 1) as renew_months")
             )
-            ->groupBy('transactions.customer_id')
+            ->groupBy('subscriptions.customer_id', 'subscriptions.id', 'forward_plans.hard_cost_price', 'forward_plans.cost_price', 'subscriptions.duration', 'subscriptions.unit', 'subscriptions.price');
+        $renewFwdHardCostRows = DB::table(DB::raw("({$renewFwdHardCostSub->toSql()}) as per_sub"))
+            ->mergeBindings($renewFwdHardCostSub)
+            ->select('customer_id', DB::raw('SUM(fwd_unit_cost * renew_months) as fwd_cost'))
+            ->groupBy('customer_id')
             ->get();
         foreach ($renewFwdHardCostRows as $row) {
             $renewFwdHardCostData[$row->customer_id] = (float) $row->fwd_cost;
