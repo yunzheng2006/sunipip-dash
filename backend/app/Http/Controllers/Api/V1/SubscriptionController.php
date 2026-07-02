@@ -1340,6 +1340,33 @@ class SubscriptionController extends Controller
                     'description' => "测试转正 #{$subscription->id}（{$duration}个月 × ¥{$price}/月）",
                     'operated_by' => $request->user()->id,
                 ]);
+
+                try {
+                    $refreshedCustomer = $customer->refresh();
+                    $durationMonthsForComm = max(\App\Support\DurationHelper::toMonths($duration, $unit), 1);
+                    $fwdRule = ForwardRule::where('subscription_id', $subscription->id)
+                        ->orderByRaw("status = 'active' DESC")
+                        ->first();
+                    $isFixedPricing = $fwdRule?->forwardPlan?->isFixedPricing() ?? false;
+                    $ipListPricePerMonth = $isFixedPricing ? 0 : (float) ($subscription->list_price ?: $price);
+                    $fwdListPricePerMonth = $fwdRule?->forwardPlan ? (float) $fwdRule->forwardPlan->base_price : 0;
+                    $totalListPrice = round(($ipListPricePerMonth + $fwdListPricePerMonth) * $durationMonthsForComm, 2);
+                    $productCtx = [];
+                    if ($proxyIp) {
+                        $sparkInstance = \App\Models\SparkInstance::where('proxy_ip_id', $proxyIp->id)->first();
+                        $productCtx = [
+                            'country_code' => $proxyIp->country_code ?? null,
+                            'city_code'    => $proxyIp->city ?? null,
+                            'product_id'   => $sparkInstance?->sparkOrder?->product_id,
+                            'module'       => $fwdRule?->forwardPlan?->module ?? 'static',
+                        ];
+                    }
+                    app(\App\Services\ReferralService::class)->processCommission(
+                        $refreshedCustomer, 'purchase', $totalCharge, $subscription->id, $totalListPrice ?: $totalCharge, $productCtx
+                    );
+                } catch (\Throwable $e) {
+                    \Log::warning('Commission on convertTest failed: ' . $e->getMessage());
+                }
             }
 
             // 同步 ProxyIp 到期时间
