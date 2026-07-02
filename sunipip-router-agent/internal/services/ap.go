@@ -178,6 +178,19 @@ rm -f /etc/modprobe.d/sunipip-no-nss-vlan.conf /etc/modprobe.d/blacklist-ath11k-
 uci delete network.wan6 2>/dev/null || true
 uci delete network.globals.ula_prefix 2>/dev/null || true
 
+# Remove wan port from br-lan (factory default may have it there)
+IDX=0
+while uci -q get "network.@device[${IDX}]" >/dev/null 2>&1; do
+    NAME=$(uci -q get "network.@device[${IDX}].name")
+    if [ "$NAME" = "br-lan" ]; then
+        uci del_list "network.@device[${IDX}].ports=wan" 2>/dev/null
+        echo "[V2] Removed wan from br-lan"
+        break
+    fi
+    IDX=$((IDX + 1))
+done
+
+# Create br-trunk bridge
 TRUNK_EXISTS=0; IDX=0
 while uci -q get "network.@device[${IDX}]" >/dev/null 2>&1; do
     NAME=$(uci -q get "network.@device[${IDX}].name")
@@ -189,7 +202,7 @@ if [ "$TRUNK_EXISTS" = "0" ]; then
     uci set "network.@device[-1].name=br-trunk"
     uci set "network.@device[-1].type=bridge"
     uci add_list "network.@device[-1].ports=wan"
-    echo "[V2] Created br-trunk with wan port"
+    echo "[V2] Created br-trunk (wan)"
 fi
 uci set network.wan.device='br-trunk'
 uci set network.wan.proto='static'
@@ -223,10 +236,19 @@ if ! uci show firewall 2>/dev/null | grep -q "Allow-SSH-WAN"; then
     uci set firewall.@rule[-1].target='ACCEPT'
 fi
 
-# 5. Wireless: all radios, RADIUS auth, network=wan
+# 5. Wireless: delete ALL factory wifi-ifaces, create fresh ones on wan (br-trunk)
+while uci -q get "wireless.@wifi-iface[0]" >/dev/null 2>&1; do
+    uci delete "wireless.@wifi-iface[0]"
+done
+echo "[V2] Cleared all factory wifi-ifaces"
+
 for radio in radio0 radio1 radio2 radio3; do
     uci -q get "wireless.${radio}" >/dev/null 2>&1 || continue
     IFACE="default_${radio}"
+    uci set "wireless.${IFACE}=wifi-iface"
+    uci set "wireless.${IFACE}.device=${radio}"
+    uci set "wireless.${IFACE}.mode=ap"
+
     uci set "wireless.${radio}.disabled=0"
     uci set "wireless.${radio}.country=HK"
     BAND=$(uci -q get "wireless.${radio}.band" 2>/dev/null)
@@ -241,11 +263,6 @@ for radio in radio0 radio1 radio2 radio3; do
             fi ;;
         6g) uci set "wireless.${radio}.channel=1"; uci set "wireless.${radio}.htmode=HE160" ;;
     esac
-    if ! uci -q get "wireless.${IFACE}" >/dev/null 2>&1; then
-        uci set "wireless.${IFACE}=wifi-iface"
-        uci set "wireless.${IFACE}.device=${radio}"
-        uci set "wireless.${IFACE}.mode=ap"
-    fi
     uci set "wireless.${IFACE}.ssid=SunIPIP.com Streaming LAN"
     uci set "wireless.${IFACE}.encryption=wpa2+ccmp"
     uci set "wireless.${IFACE}.network=wan"
@@ -253,10 +270,8 @@ for radio in radio0 radio1 radio2 radio3; do
     uci set "wireless.${IFACE}.auth_port=1812"
     uci set "wireless.${IFACE}.auth_secret=%s"
     uci set "wireless.${IFACE}.dynamic_vlan=0"
-    uci -q delete "wireless.${IFACE}.vlan_tagged_interface" 2>/dev/null
-    uci -q delete "wireless.${IFACE}.vlan_naming" 2>/dev/null
     uci set "wireless.${IFACE}.ieee80211w=1"
-    echo "[V2] ${radio}: band=${BAND} network=wan"
+    echo "[V2] ${radio}: band=${BAND} network=wan (br-trunk)"
 done
 
 # 6. Remove v1 watchdog

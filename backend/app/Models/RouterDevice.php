@@ -21,7 +21,7 @@ class RouterDevice extends Model
         'config_version', 'applied_config_version',
         'last_heartbeat_at', 'last_heartbeat_ip', 'system_info',
         'ap_management_enabled', 'ap_ip', 'ap_config', 'ap_discovery', 'ap_discover_requested',
-        'wifi_ip_next_index', 'wifi_version', 'remark',
+        'wifi_ip_next_index', 'wifi_version', 'wifi_max_devices_per_account', 'remark',
     ];
 
     protected $hidden = ['agent_key', 'install_token'];
@@ -41,6 +41,7 @@ class RouterDevice extends Model
             'ap_discover_requested' => 'boolean',
             'wifi_ip_next_index' => 'integer',
             'wifi_version' => 'integer',
+            'wifi_max_devices_per_account' => 'integer',
         ];
     }
 

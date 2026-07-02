@@ -32,6 +32,7 @@ func (s *DHCPService) Apply(ctx context.Context, cfg api.NetworkConfig, configVe
 	if err := os.MkdirAll(dnsmasqConfigDir, 0755); err != nil {
 		return fmt.Errorf("create dnsmasq config dir: %w", err)
 	}
+	os.MkdirAll("/etc/sunipip/dhcp-hosts.d", 0755)
 
 	// Remove existing agent-managed configs
 	if err := s.cleanManagedConfigs(); err != nil {
@@ -121,7 +122,7 @@ func (s *DHCPService) writeVLANConfig(vlan api.VLANConfig) error {
 
 	b.WriteString(fmt.Sprintf("dhcp-option=interface:%s,3,%s\n", vlan.Bridge, gateway))
 	b.WriteString(fmt.Sprintf("dhcp-option=interface:%s,6,%s\n", vlan.Bridge, dns))
-	b.WriteString("dhcp-hostsfile=/etc/sunipip/dhcp-hosts.conf\n")
+	b.WriteString("dhcp-hostsdir=/etc/sunipip/dhcp-hosts.d/\n")
 
 	path := filepath.Join(dnsmasqConfigDir, fmt.Sprintf("sunipip-vlan-%d.conf", vlan.VLANID))
 	if err := writeFileAtomic(path, []byte(b.String()), 0644); err != nil {
@@ -181,7 +182,7 @@ func (s *DHCPService) writeTrunkConfig(trunk api.TrunkConfig) error {
 			wifiGateway, wifiNetmask, wifiLease))
 		b.WriteString(fmt.Sprintf("dhcp-option=tag:wifi,3,%s\n", wifiGateway))
 		b.WriteString(fmt.Sprintf("dhcp-option=tag:wifi,6,%s\n", wifiDNS))
-		b.WriteString("dhcp-hostsfile=/etc/sunipip/dhcp-hosts.conf\n")
+		b.WriteString("dhcp-hostsdir=/etc/sunipip/dhcp-hosts.d/\n")
 	}
 
 	path := filepath.Join(dnsmasqConfigDir, "sunipip-trunk.conf")

@@ -298,12 +298,17 @@ class SalesStatsNewController extends Controller
         }
 
         // 4a+: 管理员测试转正的 sales_cost（started_at 保留测试日期，通过交易日期匹配）
+        // 排除 started_at 已在本期内的订阅（已被 4a 统计），避免重复计算
         if ($convertSubIds->isNotEmpty()) {
             $convertCostRows = DB::table('subscriptions')
                 ->where(fn($q) => $costCustWhereInShort($q, $customerIds))
                 ->whereIn('id', $convertSubIds)
                 ->where('is_test', false)
                 ->where(fn($q) => $costSubFilter($q))
+                ->whereNot(function ($q) use ($periodStart, $periodEnd) {
+                    $q->where('started_at', '>=', $periodStart)
+                      ->where('started_at', '<=', $periodEnd);
+                })
                 ->select(DB::raw("{$costCustExprShort} as customer_id"), DB::raw("SUM(COALESCE(sales_cost, 0) * {$initialMonthsExpr}) as ip_cost"))
                 ->groupBy(DB::raw($costCustExprShort))
                 ->get();

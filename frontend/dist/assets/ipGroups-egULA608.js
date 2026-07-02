@@ -1,0 +1,1 @@
+import{z as r}from"./index-C7YhkBtq.js";function e(p){return r.get("/ip-groups",{params:p})}function o(p){return r.post("/ip-groups",p)}function n(p,u){return r.put(`/ip-groups/${p}`,u)}function s(p){return r.delete(`/ip-groups/${p}`)}function i(){return r.get("/ip-groups/all")}export{e as a,o as c,s as d,i as g,n as u};

@@ -20,7 +20,9 @@ const (
 	dhcpHookModulePath      = "/etc/freeradius/3.0/mods-enabled/dhcp_hook"
 	dhcpHookScriptPath      = "/etc/sunipip/radius-dhcp-hook.sh"
 	userIpPoolPath          = "/etc/sunipip/user-ip-pool.conf"
-	dhcpHostsFilePath       = "/etc/sunipip/dhcp-hosts.conf"
+	dhcpHostsDirPath        = "/etc/sunipip/dhcp-hosts.d"
+	dhcpHostsFilePath       = "/etc/sunipip/dhcp-hosts.d/hosts"
+	dhcpHostsOldFilePath    = "/etc/sunipip/dhcp-hosts.conf"
 )
 
 // FreeRadiusService manages FreeRadius configuration.
@@ -48,13 +50,16 @@ func (s *FreeRadiusService) Apply(ctx context.Context, cfg api.FreeRadiusConfig,
 		return fmt.Errorf("write clients: %w", err)
 	}
 
+	os.MkdirAll(dhcpHostsDirPath, 0755)
+	s.migrateDHCPHostsDir()
+
 	hookChanged, err := s.writeDHCPHook(cfg)
 	if err != nil {
 		return fmt.Errorf("write dhcp hook: %w", err)
 	}
 
 	s.chownFiles("freerad", freeRadiusAuthorizePath, freeRadiusClientsPath, dhcpHookModulePath,
-		"/etc/sunipip/dhcp-hosts.conf", dhcpHookScriptPath, "/etc/sunipip/user-ip-pool.conf")
+		dhcpHostsFilePath, dhcpHookScriptPath, "/etc/sunipip/user-ip-pool.conf", dhcpHostsDirPath)
 	os.MkdirAll("/var/log/sunipip", 0755)
 	s.chownFiles("freerad", "/var/log/sunipip")
 	logFile := "/var/log/sunipip/radius-dhcp-hook.log"
@@ -462,14 +467,14 @@ func (s *FreeRadiusService) ensurePostAuthHook() bool {
 }
 
 // writeHookScript writes the post-auth DHCP hook shell script.
+// Uses dhcp-hostsdir with inotify: dnsmasq auto-detects file changes, no HUP needed.
 func (s *FreeRadiusService) writeHookScript() (bool, error) {
 	script := `#!/bin/bash
 # SuniPIP RADIUS Post-Auth DHCP Hook
-# Maps authenticated MAC to pre-allocated IP via dnsmasq
-# Handles MAC randomization: reclaims IPs from stale MACs (not in ARP table)
+# Maps authenticated MAC to pre-allocated IP via dnsmasq dhcp-hostsdir (inotify auto-reload)
 
 LOGFILE="/var/log/sunipip/radius-dhcp-hook.log"
-DHCP_HOSTS="/etc/sunipip/dhcp-hosts.conf"
+DHCP_HOSTS="/etc/sunipip/dhcp-hosts.d/hosts"
 POOL="/etc/sunipip/user-ip-pool.conf"
 LOCKFILE="/tmp/sunipip-dhcp-hook.lock"
 
@@ -512,12 +517,14 @@ fi
 IPS=$(echo "$LINE" | cut -d' ' -f2)
 IFS=',' read -ra IP_ARRAY <<< "$IPS"
 
-# Find first unused IP
+# Find first unused IP (inotify on dhcp-hostsdir auto-reloads dnsmasq)
 FOUND=0
 for IP in "${IP_ARRAY[@]}"; do
     if ! grep -q ",${IP}," "$DHCP_HOSTS" 2>/dev/null && ! grep -q ",${IP}$" "$DHCP_HOSTS" 2>/dev/null; then
-        echo "${MAC},${IP},1h" >> "$DHCP_HOSTS"
-        kill -HUP $(pidof dnsmasq) 2>/dev/null
+        TMP="${DHCP_HOSTS}.tmp.$$"
+        cp "$DHCP_HOSTS" "$TMP" 2>/dev/null || touch "$TMP"
+        echo "${MAC},${IP},1h" >> "$TMP"
+        mv "$TMP" "$DHCP_HOSTS"
         log "ASSIGNED: user=$USER mac=$MAC ip=$IP"
         FOUND=1
         break
@@ -526,20 +533,18 @@ done
 
 if [ "$FOUND" = "0" ]; then
     # All IPs occupied — try to reclaim from stale MACs (not in ARP table)
-    # This handles iOS/Android random MAC: old MAC is gone, reclaim its IP
     for IP in "${IP_ARRAY[@]}"; do
         OLD_LINE=$(grep ",${IP}," "$DHCP_HOSTS" 2>/dev/null || grep ",${IP}$" "$DHCP_HOSTS" 2>/dev/null)
         if [ -z "$OLD_LINE" ]; then continue; fi
         OLD_MAC=$(echo "$OLD_LINE" | sed 's/,.*//')
         if [ -z "$OLD_MAC" ]; then continue; fi
-        # Check if old MAC is still reachable (in ARP table)
         if ip neigh show 2>/dev/null | grep -qi "$OLD_MAC"; then
             continue
         fi
-        # Old MAC is gone — reclaim this IP
-        sed -i "/^${OLD_MAC},/d" "$DHCP_HOSTS"
-        echo "${MAC},${IP},1h" >> "$DHCP_HOSTS"
-        kill -HUP $(pidof dnsmasq) 2>/dev/null
+        TMP="${DHCP_HOSTS}.tmp.$$"
+        grep -v "^${OLD_MAC}," "$DHCP_HOSTS" > "$TMP" 2>/dev/null || touch "$TMP"
+        echo "${MAC},${IP},1h" >> "$TMP"
+        mv "$TMP" "$DHCP_HOSTS"
         log "RECLAIMED: user=$USER old_mac=$OLD_MAC new_mac=$MAC ip=$IP"
         FOUND=1
         break
@@ -563,6 +568,27 @@ exit 0
 	}
 	s.logger.Info("Wrote RADIUS DHCP hook script")
 	return true, nil
+}
+
+// migrateDHCPHostsDir moves dhcp-hosts.conf from the old flat file into dhcp-hosts.d/.
+func (s *FreeRadiusService) migrateDHCPHostsDir() {
+	if _, err := os.Stat(dhcpHostsOldFilePath); err != nil {
+		return
+	}
+	if _, err := os.Stat(dhcpHostsFilePath); err == nil {
+		os.Remove(dhcpHostsOldFilePath)
+		return
+	}
+	data, err := os.ReadFile(dhcpHostsOldFilePath)
+	if err != nil {
+		return
+	}
+	if err := writeFileAtomic(dhcpHostsFilePath, data, 0644); err != nil {
+		s.logger.Warn("Failed to migrate dhcp-hosts to dir", "error", err)
+		return
+	}
+	os.Remove(dhcpHostsOldFilePath)
+	s.logger.Info("Migrated dhcp-hosts.conf to dhcp-hosts.d/hosts")
 }
 
 // GetCurrentConfig reads the current authorize file for drift detection.

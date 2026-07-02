@@ -119,13 +119,15 @@ class RouterController extends Controller
             ->where('customer_id', $customer->id)
             ->firstOrFail();
 
+        $deviceMax = $device->wifi_max_devices_per_account ?? 10;
+
         $data = $request->validate([
-            'username' => 'nullable|string|max:64|regex:/^[a-zA-Z0-9_-]+$/',
+            'username' => 'nullable|string|max:64|regex:/^[a-zA-Z0-9._-]+$/',
             'password' => 'nullable|string|max:128',
             'label' => 'nullable|string|max:100',
             'proxy_subscription_id' => 'nullable|integer',
             'proxy_mode' => 'nullable|string|in:proxy,direct',
-            'max_devices' => 'nullable|integer|min:1|max:10',
+            'max_devices' => "nullable|integer|min:1|max:{$deviceMax}",
         ]);
 
         if (!empty($data['proxy_subscription_id'])) {
@@ -159,6 +161,9 @@ class RouterController extends Controller
             $q->where('customer_id', $customer->id);
         })->findOrFail($accountId);
 
+        $device = $account->device;
+        $deviceMax = $device ? ($device->wifi_max_devices_per_account ?? 10) : 10;
+
         $data = $request->validate([
             'username' => 'nullable|string|max:64',
             'password' => 'nullable|string|max:128',
@@ -166,7 +171,7 @@ class RouterController extends Controller
             'proxy_subscription_id' => 'nullable|integer',
             'proxy_mode' => 'nullable|string|in:proxy,direct',
             'is_active' => 'nullable|boolean',
-            'max_devices' => 'nullable|integer|min:1|max:10',
+            'max_devices' => "nullable|integer|min:1|max:{$deviceMax}",
         ]);
 
         if (!empty($data['proxy_subscription_id'])) {

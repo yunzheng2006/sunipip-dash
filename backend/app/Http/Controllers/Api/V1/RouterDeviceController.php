@@ -127,6 +127,7 @@ class RouterDeviceController extends Controller
             'ap_management_enabled' => 'nullable|boolean',
             'ap_ip' => 'nullable|string|max:45',
             'target_agent_version' => 'nullable|string|max:30',
+            'wifi_max_devices_per_account' => 'nullable|integer|min:1|max:50',
         ]);
 
         $routerDevice->update($data);
@@ -249,13 +250,15 @@ class RouterDeviceController extends Controller
             return $this->error('设备未绑定客户，无法创建 WiFi 账号', 422);
         }
 
+        $deviceMax = $routerDevice->wifi_max_devices_per_account ?? 10;
+
         $data = $request->validate([
-            'username' => 'nullable|string|max:64|regex:/^[a-zA-Z0-9_-]+$/',
+            'username' => 'nullable|string|max:64|regex:/^[a-zA-Z0-9._-]+$/',
             'password' => 'nullable|string|max:128',
             'label' => 'nullable|string|max:100',
             'proxy_subscription_id' => 'nullable|integer|exists:subscriptions,id',
             'proxy_mode' => 'nullable|string|in:proxy,direct',
-            'max_devices' => 'nullable|integer|min:1|max:50',
+            'max_devices' => "nullable|integer|min:1|max:{$deviceMax}",
         ]);
 
         try {
@@ -270,6 +273,8 @@ class RouterDeviceController extends Controller
     public function updateWifiAccount(Request $request, int $accountId): JsonResponse
     {
         $account = \App\Models\RouterWifiAccount::findOrFail($accountId);
+        $device = $account->device;
+        $deviceMax = $device ? ($device->wifi_max_devices_per_account ?? 10) : 50;
 
         $data = $request->validate([
             'username' => 'nullable|string|max:64',
@@ -278,7 +283,7 @@ class RouterDeviceController extends Controller
             'proxy_subscription_id' => 'nullable|integer|exists:subscriptions,id',
             'proxy_mode' => 'nullable|string|in:proxy,direct',
             'is_active' => 'nullable|boolean',
-            'max_devices' => 'nullable|integer|min:1|max:5',
+            'max_devices' => "nullable|integer|min:1|max:{$deviceMax}",
         ]);
 
         $account = $this->wifiService->updateWifiAccount($account, $data);

@@ -137,7 +137,7 @@ func (m *Manager) detectDrift(ctx context.Context) []string {
 			for _, path := range []string{
 				"/etc/sunipip/radius-dhcp-hook.sh",
 				"/etc/sunipip/user-ip-pool.conf",
-				"/etc/sunipip/dhcp-hosts.conf",
+				"/etc/sunipip/dhcp-hosts.d/hosts",
 			} {
 				if _, err := os.Stat(path); os.IsNotExist(err) {
 					drifts = append(drifts, path+" missing")

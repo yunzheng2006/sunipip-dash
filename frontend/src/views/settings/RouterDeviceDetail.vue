@@ -62,6 +62,9 @@
                   {{ device.wifi_version >= 2 ? 'v2 (Flat IP)' : 'v1 (VLAN)' }}
                 </el-tag>
               </el-descriptions-item>
+              <el-descriptions-item label="每 WiFi 最大设备" v-if="device.wifi_version >= 2">
+                <el-tag size="small">{{ device.wifi_max_devices_per_account || 5 }} 台</el-tag>
+              </el-descriptions-item>
               <el-descriptions-item label="管理段 DHCP" v-if="device.wifi_version >= 2">
                 <el-button size="small" type="warning" @click="handleToggleTrunkDhcp(true)" :loading="trunkDhcpLoading">
                   临时开启
@@ -297,6 +300,10 @@
             <el-option v-for="b in catalogOptions.bundles || []" :key="b.id" :label="b.name" :value="b.id" />
           </el-select>
         </el-form-item>
+        <el-form-item label="WiFi 最大设备" v-if="device.wifi_version >= 2">
+          <el-input-number v-model="editForm.wifi_max_devices_per_account" :min="1" :max="50" />
+          <div style="font-size: 12px; color: #94a3b8; margin-top: 2px">每个 WiFi 账号最多绑定多少台设备（分配多少个 /32 IP）</div>
+        </el-form-item>
         <el-form-item label="灰度 Agent">
           <el-input v-model="editForm.target_agent_version" placeholder="指定版本号(如 1.3.0)，留空跟随全局" clearable />
           <div style="font-size: 12px; color: #94a3b8; margin-top: 2px">设置后此设备心跳将收到该版本号，用于灰度测试新 agent</div>
@@ -354,8 +361,8 @@
             <el-input v-model="wifiForm.password" />
           </el-form-item>
           <el-form-item label="最大设备数">
-            <el-input-number v-model="wifiForm.max_devices" :min="1" :max="50" />
-            <div style="font-size: 12px; color: #94a3b8; margin-top: 2px">每台设备分配一个独立 /32 IP，创建后不可修改</div>
+            <el-input-number v-model="wifiForm.max_devices" :min="1" :max="device.wifi_max_devices_per_account || 5" />
+            <div style="font-size: 12px; color: #94a3b8; margin-top: 2px">每台设备分配一个独立 /32 IP（上限 {{ device.wifi_max_devices_per_account || 5 }}，可在设备编辑中调整）</div>
           </el-form-item>
         </el-form>
       </div>
@@ -411,7 +418,7 @@
           </el-select>
         </el-form-item>
         <el-form-item label="最大设备数">
-          <el-input-number v-model="wifiEditForm.max_devices" :min="1" :max="5" />
+          <el-input-number v-model="wifiEditForm.max_devices" :min="1" :max="device.wifi_max_devices_per_account || 5" />
         </el-form-item>
         <el-form-item label="状态">
           <el-switch v-model="wifiEditForm.is_active" :active-value="1" :inactive-value="0" />
@@ -577,7 +584,7 @@ const customerLoading = ref(false)
 
 // Edit
 const editVisible = ref(false)
-const editForm = reactive({ serial_number: '', remark: '', router_model_id: null, ap_model_id: null, bundle_id: null, target_agent_version: '' })
+const editForm = reactive({ serial_number: '', remark: '', router_model_id: null, ap_model_id: null, bundle_id: null, target_agent_version: '', wifi_max_devices_per_account: 5 })
 const catalogOptions = ref({})
 
 // Install token
@@ -646,10 +653,23 @@ ROUTER_IP=$(ip route 2>/dev/null | awk '/default/{print $3}' | head -1)
 [ -z "$ROUTER_IP" ] && ROUTER_IP="10.20.0.1"
 log "RADIUS 服务器: \${ROUTER_IP}:\${RADIUS_PORT}"
 
-# ---- 3. 网络配置 (br-trunk + WAN DHCP) ----
+# ---- 3. 网络配置 (br-trunk + WAN) ----
 uci delete network.wan6 2>/dev/null || true
 uci delete network.globals.ula_prefix 2>/dev/null || true
 
+# 从 br-lan 移除 wan 端口（出厂可能在 br-lan 里）
+IDX=0
+while uci -q get "network.@device[\${IDX}]" >/dev/null 2>&1; do
+    NAME=$(uci -q get "network.@device[\${IDX}].name")
+    if [ "$NAME" = "br-lan" ]; then
+        uci del_list "network.@device[\${IDX}].ports=wan" 2>/dev/null
+        ok "从 br-lan 移除 wan 端口"
+        break
+    fi
+    IDX=$((IDX + 1))
+done
+
+# 创建 br-trunk 桥接
 TRUNK_EXISTS=0; IDX=0
 while uci -q get "network.@device[\${IDX}]" >/dev/null 2>&1; do
     NAME=$(uci -q get "network.@device[\${IDX}].name")
@@ -661,22 +681,36 @@ if [ "$TRUNK_EXISTS" = "0" ]; then
     uci set "network.@device[-1].name=br-trunk"
     uci set "network.@device[-1].type=bridge"
     uci add_list "network.@device[-1].ports=wan"
-    ok "创建 br-trunk"
+    ok "创建 br-trunk (wan)"
 fi
 uci set network.wan.device='br-trunk'
-uci set network.wan.proto='dhcp'
-ok "网络配置完成"
+uci set network.wan.proto='static'
+uci set network.wan.ipaddr='10.20.0.120'
+uci set network.wan.netmask='255.255.255.0'
+uci set network.wan.gateway='10.20.0.1'
+uci set network.wan.dns='223.5.5.5 119.29.29.29'
+
+# 关闭 AP 自身 DHCP
+uci set dhcp.lan.ignore='1'
+ok "网络配置完成 (静态 IP 10.20.0.120, DHCP 已关闭)"
 
 # ---- 4. 无线配置 (v2: dynamic_vlan=0) ----
 log "配置 WPA-Enterprise (Flat IP, 无 VLAN)..."
+
+# 先删除所有出厂 wifi-iface（可能叫 wifinet0 等，绑 br-lan）
+while uci -q get "wireless.@wifi-iface[0]" >/dev/null 2>&1; do
+    uci delete "wireless.@wifi-iface[0]"
+done
+ok "清除所有出厂 wifi-iface"
+
+# 为每个 radio 创建全新的 wifi-iface，绑定 wan (br-trunk)
 for radio in radio0 radio1 radio2 radio3; do
     uci -q get "wireless.\${radio}" >/dev/null 2>&1 || continue
     IFACE="default_\${radio}"
-    if ! uci -q get "wireless.\${IFACE}" >/dev/null 2>&1; then
-        uci set "wireless.\${IFACE}=wifi-iface"
-        uci set "wireless.\${IFACE}.device=\${radio}"
-        uci set "wireless.\${IFACE}.mode=ap"
-    fi
+
+    uci set "wireless.\${IFACE}=wifi-iface"
+    uci set "wireless.\${IFACE}.device=\${radio}"
+    uci set "wireless.\${IFACE}.mode=ap"
 
     uci set "wireless.\${radio}.disabled=0"
     uci set "wireless.\${radio}.country=HK"
@@ -722,10 +756,8 @@ for radio in radio0 radio1 radio2 radio3; do
     uci set "wireless.\${IFACE}.auth_port=\${RADIUS_PORT}"
     uci set "wireless.\${IFACE}.auth_secret=\${RADIUS_SECRET}"
     uci set "wireless.\${IFACE}.dynamic_vlan=0"
-    uci -q delete "wireless.\${IFACE}.vlan_tagged_interface" 2>/dev/null
-    uci -q delete "wireless.\${IFACE}.vlan_naming" 2>/dev/null
     uci set "wireless.\${IFACE}.ieee80211w=1"
-    ok "\${radio}: WPA2-Enterprise (Flat IP)"
+    ok "\${radio}: WPA2-Enterprise → wan (br-trunk)"
 done
 
 # ---- 5. 防火墙 ----
@@ -755,6 +787,7 @@ fi
 # ---- 6. 提交并重启 ----
 uci commit network
 uci commit wireless
+uci commit dhcp
 uci commit firewall
 /etc/init.d/network restart
 sleep 3
@@ -908,6 +941,7 @@ function initEditForm() {
     ap_model_id: device.value.ap_model_id || null,
     bundle_id: device.value.bundle_id || null,
     target_agent_version: device.value.target_agent_version || '',
+    wifi_max_devices_per_account: device.value.wifi_max_devices_per_account || 5,
   })
 }
 
@@ -948,7 +982,7 @@ function openWifiWizard() {
   Object.assign(wifiForm, {
     username: `sunip-${rid}`, password: `sunip-${rid}`,
     label: wifiAccounts.value.length === 0 ? 'SunIPIP.com Streaming LAN' : '',
-    proxy_mode: 'proxy', proxy_subscription_id: null, max_devices: 5,
+    proxy_mode: 'proxy', proxy_subscription_id: null, max_devices: device.value?.wifi_max_devices_per_account || 5,
   })
   fetchAvailableSubs()
   wizardVisible.value = true

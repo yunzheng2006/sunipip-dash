@@ -54,7 +54,7 @@
         <el-table v-else :data="wifiAccounts" stripe class="desktop-only">
           <el-table-column prop="username" label="用户名" width="140" />
           <el-table-column prop="password" label="密码" width="140" />
-          <el-table-column label="通道" width="70" align="center">
+          <el-table-column v-if="device?.wifi_version < 2" label="通道" width="70" align="center">
             <template #default="{ row }"><el-tag size="small">{{ row.vlan_id }}</el-tag></template>
           </el-table-column>
           <el-table-column label="绑定节点" min-width="200">
@@ -83,7 +83,7 @@
             </div>
             <div class="wifi-card-info">
               <div>密码: {{ account.password }}</div>
-              <div>通道: {{ account.vlan_id }}</div>
+              <div v-if="device?.wifi_version < 2">通道: {{ account.vlan_id }}</div>
               <div v-if="account.subscription">节点: {{ subDisplayName(account.subscription) }}</div>
             </div>
             <div class="wifi-card-actions">
@@ -233,7 +233,7 @@
           </el-select>
         </el-form-item>
         <el-form-item label="最大设备">
-          <el-input-number v-model="editForm.max_devices" :min="1" :max="50" />
+          <el-input-number v-model="editForm.max_devices" :min="1" :max="device?.wifi_max_devices_per_account || 5" disabled />
         </el-form-item>
       </el-form>
       <template #footer>
@@ -368,7 +368,8 @@ function openWizard() {
   Object.assign(wifiForm, {
     username: `sunip-${rid}`, password: `sunip-${rid}`,
     label: '',
-    proxy_mode: 'proxy', proxy_subscription_id: null, max_devices: 10,
+    proxy_mode: 'proxy', proxy_subscription_id: null,
+    max_devices: device.value?.wifi_max_devices_per_account || 5,
   })
   fetchAvailableSubs()
   wizardVisible.value = true
