@@ -335,6 +335,28 @@ class SalesStatsNewController extends Controller
             $newFwdCostData[$row->customer_id] = (float) $row->fwd_cost;
         }
 
+        // 4b+: 管理员测试转正的中转 sales_cost（started_at 不在本期，通过 convertSubIds 匹配）
+        if ($convertSubIds->isNotEmpty()) {
+            $convertFwdCostRows = DB::table('forward_rules')
+                ->join('subscriptions', 'forward_rules.subscription_id', '=', 'subscriptions.id')
+                ->leftJoin('forward_plans', 'forward_rules.forward_plan_id', '=', 'forward_plans.id')
+                ->where(fn($q) => $costCustWhereIn($q, $customerIds))
+                ->whereIn('subscriptions.id', $convertSubIds)
+                ->where('subscriptions.is_test', false)
+                ->where('forward_rules.status', 'active')
+                ->where(fn($q) => $costSubFilterJoined($q))
+                ->whereNot(function ($q) use ($periodStart, $periodEnd) {
+                    $q->where('subscriptions.started_at', '>=', $periodStart)
+                      ->where('subscriptions.started_at', '<=', $periodEnd);
+                })
+                ->select(DB::raw("{$costCustExpr} as customer_id"), DB::raw("SUM(COALESCE(forward_plans.cost_price, 0) * {$initialMonthsExpr}) as fwd_cost"))
+                ->groupBy(DB::raw($costCustExpr))
+                ->get();
+            foreach ($convertFwdCostRows as $row) {
+                $newFwdCostData[$row->customer_id] = ($newFwdCostData[$row->customer_id] ?? 0) + (float) $row->fwd_cost;
+            }
+        }
+
         // 4c. 续费 IP 成本：先按订阅聚合交易金额再算月数，避免逐笔 round 误差
         $renewCostData = [];
         $renewCostSub = DB::table('transactions')
@@ -656,6 +678,28 @@ class SalesStatsNewController extends Controller
             ->get();
         foreach ($newFwdHardCostRows as $row) {
             $newFwdHardCostData[$row->customer_id] = (float) $row->fwd_cost;
+        }
+
+        // 6c+: 管理员测试转正的中转硬成本（started_at 不在本期，通过 convertSubIds 匹配）
+        if ($convertSubIds->isNotEmpty()) {
+            $convertFwdHardCostRows = DB::table('forward_rules')
+                ->join('subscriptions', 'forward_rules.subscription_id', '=', 'subscriptions.id')
+                ->leftJoin('forward_plans', 'forward_rules.forward_plan_id', '=', 'forward_plans.id')
+                ->where(fn($q) => $costCustWhereIn($q, $customerIds))
+                ->whereIn('subscriptions.id', $convertSubIds)
+                ->where('subscriptions.is_test', false)
+                ->where('forward_rules.status', 'active')
+                ->where(fn($q) => $costSubFilterJoined($q))
+                ->whereNot(function ($q) use ($periodStart, $periodEnd) {
+                    $q->where('subscriptions.started_at', '>=', $periodStart)
+                      ->where('subscriptions.started_at', '<=', $periodEnd);
+                })
+                ->select(DB::raw("{$costCustExpr} as customer_id"), DB::raw("SUM({$fwdHardExpr} * {$initialMonthsExpr}) as fwd_cost"))
+                ->groupBy(DB::raw($costCustExpr))
+                ->get();
+            foreach ($convertFwdHardCostRows as $row) {
+                $newFwdHardCostData[$row->customer_id] = ($newFwdHardCostData[$row->customer_id] ?? 0) + (float) $row->fwd_cost;
+            }
         }
 
         $renewFwdHardCostData = [];

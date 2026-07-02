@@ -499,14 +499,7 @@ log "AUTH: user=$USER mac=$MAC"
 exec 9>"$LOCKFILE"
 flock -w 5 9 || { log "ERROR: lock timeout"; exit 0; }
 
-# Check if this MAC already has an entry
-if grep -q "^${MAC}," "$DHCP_HOSTS" 2>/dev/null; then
-    log "EXISTING: mac=$MAC"
-    flock -u 9
-    exit 0
-fi
-
-# Get user's allocated IPs from pool file (fixed-string match)
+# Get user's allocated IPs from pool file
 LINE=$(grep -F "${USER} " "$POOL" 2>/dev/null | grep "^${USER} ")
 if [ -z "$LINE" ]; then
     log "ERROR: no pool for user=$USER"
@@ -517,14 +510,35 @@ fi
 IPS=$(echo "$LINE" | cut -d' ' -f2)
 IFS=',' read -ra IP_ARRAY <<< "$IPS"
 
-# Find first unused IP (inotify on dhcp-hostsdir auto-reloads dnsmasq)
+# Build working copy: remove this MAC's old entry (handles MAC randomization & account switch)
+TMP="/tmp/sunipip-dhcp-hosts.tmp.$$"
+grep -v "^${MAC}," "$DHCP_HOSTS" > "$TMP" 2>/dev/null || echo "# Managed by RADIUS post-auth hook" > "$TMP"
+
+# Clean stale MACs from this user's IPs (not alive in ARP = disconnected)
+is_alive() {
+    ip neigh show 2>/dev/null | grep -qi "$1.*\(REACHABLE\|STALE\|DELAY\|PROBE\)"
+}
+for IP in "${IP_ARRAY[@]}"; do
+    OLD_MAC=$(grep ",${IP}," "$TMP" 2>/dev/null | head -1 | sed 's/,.*//')
+    [ -z "$OLD_MAC" ] && OLD_MAC=$(grep ",${IP}$" "$TMP" 2>/dev/null | head -1 | sed 's/,.*//')
+    [ -z "$OLD_MAC" ] && continue
+    if ! is_alive "$OLD_MAC"; then
+        grep -v "^${OLD_MAC}," "$TMP" > "${TMP}.2"
+        mv "${TMP}.2" "$TMP"
+        log "CLEANED: user=$USER stale_mac=$OLD_MAC ip=$IP"
+    fi
+done
+
+# Assign first available IP from user's pool
 FOUND=0
 for IP in "${IP_ARRAY[@]}"; do
-    if ! grep -q ",${IP}," "$DHCP_HOSTS" 2>/dev/null && ! grep -q ",${IP}$" "$DHCP_HOSTS" 2>/dev/null; then
-        TMP="${DHCP_HOSTS}.tmp.$$"
-        cp "$DHCP_HOSTS" "$TMP" 2>/dev/null || touch "$TMP"
+    if ! grep -q ",${IP}," "$TMP" 2>/dev/null && ! grep -q ",${IP}$" "$TMP" 2>/dev/null; then
         echo "${MAC},${IP},1h" >> "$TMP"
         mv "$TMP" "$DHCP_HOSTS"
+        # Add ARP entry immediately to prevent race with concurrent auths
+        IFACE=$(ip -o addr show to "${IP%.*}.0/24" 2>/dev/null | awk '{print $2}' | head -1)
+        [ -z "$IFACE" ] && IFACE=$(ip -o addr show to "10.10.0.0/16" 2>/dev/null | awk '{print $2}' | head -1)
+        [ -n "$IFACE" ] && ip neigh replace "$IP" lladdr "$MAC" dev "$IFACE" nud reachable 2>/dev/null
         log "ASSIGNED: user=$USER mac=$MAC ip=$IP"
         FOUND=1
         break
@@ -532,27 +546,8 @@ for IP in "${IP_ARRAY[@]}"; do
 done
 
 if [ "$FOUND" = "0" ]; then
-    # All IPs occupied — try to reclaim from stale MACs (not in ARP table)
-    for IP in "${IP_ARRAY[@]}"; do
-        OLD_LINE=$(grep ",${IP}," "$DHCP_HOSTS" 2>/dev/null || grep ",${IP}$" "$DHCP_HOSTS" 2>/dev/null)
-        if [ -z "$OLD_LINE" ]; then continue; fi
-        OLD_MAC=$(echo "$OLD_LINE" | sed 's/,.*//')
-        if [ -z "$OLD_MAC" ]; then continue; fi
-        if ip neigh show 2>/dev/null | grep -qi "$OLD_MAC"; then
-            continue
-        fi
-        TMP="${DHCP_HOSTS}.tmp.$$"
-        grep -v "^${OLD_MAC}," "$DHCP_HOSTS" > "$TMP" 2>/dev/null || touch "$TMP"
-        echo "${MAC},${IP},1h" >> "$TMP"
-        mv "$TMP" "$DHCP_HOSTS"
-        log "RECLAIMED: user=$USER old_mac=$OLD_MAC new_mac=$MAC ip=$IP"
-        FOUND=1
-        break
-    done
-fi
-
-if [ "$FOUND" = "0" ]; then
-    log "ERROR: all IPs exhausted for user=$USER (all MACs still in ARP)"
+    rm -f "$TMP"
+    log "ERROR: all IPs occupied for user=$USER (all holders still alive in ARP)"
 fi
 
 flock -u 9
