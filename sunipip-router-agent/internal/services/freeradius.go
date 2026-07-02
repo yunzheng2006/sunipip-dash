@@ -59,7 +59,7 @@ func (s *FreeRadiusService) Apply(ctx context.Context, cfg api.FreeRadiusConfig,
 	}
 
 	s.chownFiles("freerad", freeRadiusAuthorizePath, freeRadiusClientsPath, dhcpHookModulePath,
-		dhcpHostsFilePath, dhcpHookScriptPath, "/etc/sunipip/user-ip-pool.conf", dhcpHostsDirPath)
+		dhcpHostsFilePath, dhcpHookScriptPath, "/etc/sunipip/user-ip-pool.conf", dhcpHostsDirPath, "/etc/sunipip")
 	os.MkdirAll("/var/log/sunipip", 0755)
 	s.chownFiles("freerad", "/var/log/sunipip")
 	logFile := "/var/log/sunipip/radius-dhcp-hook.log"
@@ -534,7 +534,12 @@ FOUND=0
 for IP in "${IP_ARRAY[@]}"; do
     if ! grep -q ",${IP}," "$TMP" 2>/dev/null && ! grep -q ",${IP}$" "$TMP" 2>/dev/null; then
         echo "${MAC},${IP},1h" >> "$TMP"
-        mv "$TMP" "$DHCP_HOSTS"
+        if [ -s "$TMP" ]; then
+            cat "$TMP" > "$DHCP_HOSTS"
+        else
+            log "ERROR: TMP file empty or missing, refusing to truncate hosts"
+        fi
+        rm -f "$TMP"
         # Add ARP entry immediately to prevent race with concurrent auths
         IFACE=$(ip -o addr show to "${IP%.*}.0/24" 2>/dev/null | awk '{print $2}' | head -1)
         [ -z "$IFACE" ] && IFACE=$(ip -o addr show to "10.10.0.0/16" 2>/dev/null | awk '{print $2}' | head -1)
