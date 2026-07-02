@@ -78,6 +78,18 @@ type CommandResultRequest struct {
 	Output    string `json:"output"`
 }
 
+// APConfig contains AP management configuration pushed from the platform.
+type APConfig struct {
+	Enabled      bool   `json:"enabled"`
+	WifiVersion  int    `json:"wifi_version"`
+	APIP         string `json:"ap_ip"`
+	StaticIP     string `json:"static_ip"`
+	Username     string `json:"username"`
+	Password     string `json:"password"`
+	RouterIP     string `json:"router_ip"`
+	RadiusSecret string `json:"radius_secret"`
+}
+
 // DeviceConfig represents the full configuration from the platform.
 type DeviceConfig struct {
 	ConfigVersion int    `json:"config_version"`
@@ -94,6 +106,22 @@ type DeviceConfig struct {
 	Clash      ClashConfig      `json:"clash"`
 	WireGuard  WireGuardConfig  `json:"wireguard"`
 	LocalPage  string           `json:"local_page"`
+	RawAP      json.RawMessage  `json:"ap_config,omitempty"`
+	AP         *APConfig        `json:"-"`
+}
+
+// ParseAP parses the raw ap_config field, handling both object and empty array cases.
+func (c *DeviceConfig) ParseAP() {
+	if len(c.RawAP) == 0 || string(c.RawAP) == "null" || string(c.RawAP) == "[]" {
+		c.AP = nil
+		return
+	}
+	var ap APConfig
+	if err := json.Unmarshal(c.RawAP, &ap); err != nil {
+		c.AP = nil
+		return
+	}
+	c.AP = &ap
 }
 
 // NetworkConfig contains all network interface configuration.
@@ -284,6 +312,7 @@ func (c *Client) PullConfig(ctx context.Context) (*DeviceConfig, error) {
 	if !wrapper.Success {
 		return nil, fmt.Errorf("pull config: server returned success=false: %s", wrapper.Message)
 	}
+	wrapper.Data.Config.ParseAP()
 	return &wrapper.Data.Config, nil
 }
 

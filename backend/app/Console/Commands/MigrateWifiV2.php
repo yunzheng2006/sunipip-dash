@@ -205,15 +205,20 @@ class MigrateWifiV2 extends Command
         $apConfig = $device->ap_config ?? [];
         $apUser = $apConfig['ap_username'] ?? 'root';
         $apPass = $this->option('ap-password') ?? ($apConfig['ap_password'] ?? 'as204921.net');
+        $apStaticIp = '10.20.0.120';
+        $device->update(['ap_ip' => $apStaticIp]);
 
-        $apScript = $this->buildApV2Script();
+        $apScript = $this->buildApV2Script($apStaticIp);
         $b64 = base64_encode($apScript);
 
         $command = sprintf(
-            'AP_IP=$(ip neigh show dev eth2 2>/dev/null | grep -v FAILED | awk \'{print $1}\' | grep \'^10\\.20\\.0\\.\' | head -1); '
+            'TRUNK_IF=$(ip -o addr show 2>/dev/null | grep "10\\.20\\.0\\." | awk \'{print $2}\' | head -1); '
+            . '[ -z "$TRUNK_IF" ] && echo "ERROR: No interface with 10.20.0.x found" && exit 1; '
+            . 'echo "Trunk interface: $TRUNK_IF"; '
+            . 'AP_IP=$(ip neigh show dev $TRUNK_IF 2>/dev/null | grep -v FAILED | awk \'{print $1}\' | grep \'^10\\.20\\.0\\.\' | head -1); '
             . 'if [ -z "$AP_IP" ]; then for i in $(seq 100 200); do ping -c1 -W1 10.20.0.$i >/dev/null 2>&1 & done; wait; '
-            . 'AP_IP=$(ip neigh show dev eth2 2>/dev/null | grep -v FAILED | awk \'{print $1}\' | grep \'^10\\.20\\.0\\.\' | head -1); fi; '
-            . '[ -z "$AP_IP" ] && echo "ERROR: AP not found on eth2" && exit 1; '
+            . 'AP_IP=$(ip neigh show dev $TRUNK_IF 2>/dev/null | grep -v FAILED | awk \'{print $1}\' | grep \'^10\\.20\\.0\\.\' | head -1); fi; '
+            . '[ -z "$AP_IP" ] && echo "ERROR: AP not found on $TRUNK_IF" && exit 1; '
             . 'echo "Discovered AP at $AP_IP"; '
             . 'echo %s | base64 -d | sshpass -p %s ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 %s@$AP_IP '
             . '"cat > /tmp/ap-v2.sh && sh /tmp/ap-v2.sh; rm -f /tmp/ap-v2.sh"',
@@ -229,94 +234,135 @@ class MigrateWifiV2 extends Command
             'status' => 'pending',
         ]);
 
-        $this->info("  AP v2 config command queued (ARP discovery on eth2)");
+        $this->info("  AP v2 config command queued (auto-detect trunk interface)");
     }
 
-    private function buildApV2Script(): string
+    private function buildApV2Script(string $apStaticIp = '10.20.0.120'): string
     {
-        return <<<'SH'
+        $script = <<<'SH'
 #!/bin/sh
-echo "[V2] AP v2 migration starting..."
+echo "[V2] Starting AP v2 migration..."
 
-# 1. Enable NSS offload (was disabled in v1)
-if [ -f /etc/modules.d/ath11k ]; then
-    echo 'ath11k nss_offload=1 frame_mode=2' > /etc/modules.d/ath11k
-    echo "[V2] ath11k nss_offload=1 frame_mode=2"
+# 1. NSS offload
+[ -f /etc/modules.d/ath11k ] && echo 'ath11k nss_offload=1 frame_mode=2' > /etc/modules.d/ath11k
+for f in 51-qca-nss-drv-vlan-mgr 51-qca-nss-drv-bridge-mgr; do
+    [ -f "/etc/modules.d/$f" ] && echo "$(echo "$f" | sed 's/^[0-9]*-//' | tr '-' '_')" > "/etc/modules.d/$f"
+done
+rm -f /etc/modprobe.d/sunipip-no-nss-vlan.conf /etc/modprobe.d/blacklist-ath11k-pci.conf
+
+# 2. Network: create br-trunk bridge with wan port, WiFi joins wan network
+uci delete network.wan6 2>/dev/null || true
+uci delete network.globals.ula_prefix 2>/dev/null || true
+
+TRUNK_EXISTS=0; IDX=0
+while uci -q get "network.@device[${IDX}]" >/dev/null 2>&1; do
+    NAME=$(uci -q get "network.@device[${IDX}].name")
+    [ "$NAME" = "br-trunk" ] && TRUNK_EXISTS=1 && break
+    IDX=$((IDX + 1))
+done
+if [ "$TRUNK_EXISTS" = "0" ]; then
+    uci add network device
+    uci set "network.@device[-1].name=br-trunk"
+    uci set "network.@device[-1].type=bridge"
+    uci add_list "network.@device[-1].ports=wan"
+    echo "[V2] Created br-trunk with wan port"
+fi
+uci set network.wan.device='br-trunk'
+uci set network.wan.proto='static'
+uci set network.wan.ipaddr='__AP_STATIC_IP__'
+uci set network.wan.netmask='255.255.255.0'
+uci set network.wan.gateway='10.20.0.1'
+uci set network.wan.dns='223.5.5.5 119.29.29.29'
+
+# 3. Disable AP's own DHCP on LAN (WiFi clients should get DHCP from router)
+uci set dhcp.lan.ignore='1'
+echo "[V2] Disabled DHCP on LAN"
+
+# 4. Firewall: wan zone open
+ZONE_IDX=0
+while uci -q get "firewall.@zone[${ZONE_IDX}]" >/dev/null 2>&1; do
+    ZNAME=$(uci -q get "firewall.@zone[${ZONE_IDX}].name")
+    if [ "$ZNAME" = "wan" ]; then
+        uci set "firewall.@zone[${ZONE_IDX}].masq=0"
+        uci set "firewall.@zone[${ZONE_IDX}].input=ACCEPT"
+        uci set "firewall.@zone[${ZONE_IDX}].forward=ACCEPT"
+        break
+    fi
+    ZONE_IDX=$((ZONE_IDX + 1))
+done
+if ! uci show firewall 2>/dev/null | grep -q "Allow-SSH-WAN"; then
+    uci add firewall rule >/dev/null
+    uci set firewall.@rule[-1].name='Allow-SSH-WAN'
+    uci set firewall.@rule[-1].src='wan'
+    uci set firewall.@rule[-1].dest_port='22'
+    uci set firewall.@rule[-1].proto='tcp'
+    uci set firewall.@rule[-1].target='ACCEPT'
 fi
 
-# 2. Re-enable NSS VLAN/bridge modules (v1 disabled them)
-for f in 51-qca-nss-drv-vlan-mgr 51-qca-nss-drv-bridge-mgr; do
-    if [ -f "/etc/modules.d/$f" ]; then
-        if grep -q "disabled" "/etc/modules.d/$f" 2>/dev/null; then
-            MOD=$(echo "$f" | sed 's/^[0-9]*-//' | tr '-' '_')
-            echo "$MOD" > "/etc/modules.d/$f"
-            echo "[V2] Re-enabled $f"
-        fi
-    fi
-done
-
-# 3. Remove v1 blacklists
-rm -f /etc/modprobe.d/sunipip-no-nss-vlan.conf
-rm -f /etc/modprobe.d/blacklist-ath11k-pci.conf
-echo "[V2] Removed v1 modprobe blacklists"
-
-# 4. Enable ALL radios + set dynamic_vlan=0
+# 5. Wireless: all radios enabled, dynamic_vlan=0, network=wan (br-trunk)
+ROUTER_IP=$(ip route 2>/dev/null | awk '/default/{print $3}' | head -1)
+[ -z "$ROUTER_IP" ] && ROUTER_IP="10.20.0.1"
 for radio in radio0 radio1 radio2 radio3; do
     uci -q get "wireless.${radio}" >/dev/null 2>&1 || continue
     IFACE="default_${radio}"
-    BAND=$(uci -q get "wireless.${radio}.band" 2>/dev/null)
-
-    # Enable radio
     uci set "wireless.${radio}.disabled=0"
-
-    # Configure band
+    uci set "wireless.${radio}.country=HK"
+    BAND=$(uci -q get "wireless.${radio}.band" 2>/dev/null)
+    RPATH=$(uci -q get "wireless.${radio}.path" 2>/dev/null)
     case "$BAND" in
-        2g)
-            uci set "wireless.${radio}.channel=6"
-            uci set "wireless.${radio}.htmode=HE40"
-            ;;
+        2g) uci set "wireless.${radio}.channel=6"; uci set "wireless.${radio}.htmode=HE40"; uci set "wireless.${radio}.noscan=1" ;;
         5g)
-            RPATH=$(uci -q get "wireless.${radio}.path" 2>/dev/null)
             if echo "$RPATH" | grep -q "pci"; then
-                uci set "wireless.${radio}.channel=36"
-                uci set "wireless.${radio}.htmode=HE160"
-                echo "[V2] ${radio}: PCIe 5GHz ENABLED (HE160 CH36)"
+                uci set "wireless.${radio}.channel=36"; uci set "wireless.${radio}.htmode=HE160"
             else
-                uci set "wireless.${radio}.channel=149"
-                uci set "wireless.${radio}.htmode=HE80"
-                echo "[V2] ${radio}: SoC 5GHz (HE80 CH149)"
-            fi
-            ;;
-        6g)
-            uci set "wireless.${radio}.channel=1"
-            uci set "wireless.${radio}.htmode=HE160"
-            echo "[V2] ${radio}: 6GHz (HE160)"
-            ;;
+                uci set "wireless.${radio}.channel=149"; uci set "wireless.${radio}.htmode=HE80"
+            fi ;;
+        6g) uci set "wireless.${radio}.channel=1"; uci set "wireless.${radio}.htmode=HE160" ;;
     esac
-
-    # Disable dynamic VLAN (v2: flat IP mode)
-    if uci -q get "wireless.${IFACE}" >/dev/null 2>&1; then
-        uci set "wireless.${IFACE}.dynamic_vlan=0"
-        uci -q delete "wireless.${IFACE}.vlan_tagged_interface" 2>/dev/null
-        uci -q delete "wireless.${IFACE}.vlan_naming" 2>/dev/null
+    if ! uci -q get "wireless.${IFACE}" >/dev/null 2>&1; then
+        uci set "wireless.${IFACE}=wifi-iface"
+        uci set "wireless.${IFACE}.device=${radio}"
+        uci set "wireless.${IFACE}.mode=ap"
     fi
+    uci set "wireless.${IFACE}.ssid=SunIPIP.com Streaming LAN"
+    uci set "wireless.${IFACE}.encryption=wpa2+ccmp"
+    uci set "wireless.${IFACE}.network=wan"
+    uci set "wireless.${IFACE}.auth_server=${ROUTER_IP}"
+    uci set "wireless.${IFACE}.auth_port=1812"
+    uci set "wireless.${IFACE}.auth_secret=sunipip_radius_secret"
+    uci set "wireless.${IFACE}.dynamic_vlan=0"
+    uci -q delete "wireless.${IFACE}.vlan_tagged_interface" 2>/dev/null
+    uci -q delete "wireless.${IFACE}.vlan_naming" 2>/dev/null
+    uci set "wireless.${IFACE}.ieee80211w=1"
+    echo "[V2] ${radio}: band=${BAND} network=wan dynamic_vlan=0"
 done
-echo "[V2] dynamic_vlan=0, VLAN tagging removed"
 
-# 5. Commit + reboot (NSS param change requires reboot)
+# 6. Remove v1 watchdog
+rm -f /usr/bin/radius_watchdog.sh
+crontab -l 2>/dev/null | grep -v "radius_watchdog" | crontab - 2>/dev/null
+
+# 7. Commit all
+uci commit network
 uci commit wireless
+uci commit dhcp
+uci commit firewall
 
 echo "--- Verify ---"
 cat /etc/modules.d/ath11k 2>/dev/null
 for radio in radio0 radio1 radio2 radio3; do
     uci -q get "wireless.${radio}" >/dev/null 2>&1 || continue
-    IFACE="default_${radio}"
-    echo "${radio}: disabled=$(uci -q get wireless.${radio}.disabled) band=$(uci -q get wireless.${radio}.band) dvlan=$(uci -q get wireless.${IFACE}.dynamic_vlan)"
+    echo "${radio}: network=$(uci -q get wireless.default_${radio}.network) dvlan=$(uci -q get wireless.default_${radio}.dynamic_vlan)"
 done
+echo "wan.device=$(uci -q get network.wan.device)"
+echo "dhcp.lan.ignore=$(uci -q get dhcp.lan.ignore)"
 
-echo "[V2] Scheduling reboot in 5 seconds..."
+echo "wan.proto=$(uci -q get network.wan.proto)"
+echo "wan.ipaddr=$(uci -q get network.wan.ipaddr)"
+
 nohup sh -c 'sleep 5 && reboot' >/dev/null 2>&1 &
-echo "[V2] Done. AP will reboot shortly."
+echo "[V2] Done. AP rebooting in 5s."
 SH;
+
+        return str_replace('__AP_STATIC_IP__', $apStaticIp, $script);
     }
 }

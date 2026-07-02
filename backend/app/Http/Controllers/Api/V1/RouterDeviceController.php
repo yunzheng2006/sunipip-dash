@@ -6,6 +6,7 @@ use App\Http\Controllers\Controller;
 use App\Models\Customer;
 use App\Models\RouterDevice;
 use App\Models\RouterEventLog;
+use App\Models\RouterRemoteCommand;
 use App\Services\Router\RouterConfigService;
 use App\Services\Router\RouterProvisionService;
 use App\Services\Router\RouterWifiService;
@@ -359,6 +360,51 @@ class RouterDeviceController extends Controller
         ]);
 
         return $this->success(null, '重启命令已发送');
+    }
+
+    public function toggleTrunkDhcp(Request $request, RouterDevice $routerDevice): JsonResponse
+    {
+        $data = $request->validate([
+            'enabled' => 'required|boolean',
+        ]);
+
+        if ($routerDevice->status === 'decommissioned') {
+            return $this->error('设备已停用', 422);
+        }
+
+        $enabled = $data['enabled'];
+
+        if ($enabled) {
+            $cmd = 'cat /etc/dnsmasq.d/sunipip-trunk.conf | grep -q "^dhcp-range=set:mgmt" && echo "already enabled" && exit 0; '
+                . 'NETMASK=$(grep "dhcp-range=set:wifi" /etc/dnsmasq.d/sunipip-trunk.conf | head -1 | sed "s/.*,static,//;s/,.*//"); '
+                . '[ -z "$NETMASK" ] && NETMASK="255.255.255.0"; '
+                . 'sed -i "/^interface=/a dhcp-range=set:mgmt,10.20.0.100,10.20.0.200,255.255.255.0,5m\ndhcp-option=tag:mgmt,3,10.20.0.1\ndhcp-option=tag:mgmt,6,10.20.0.1" /etc/dnsmasq.d/sunipip-trunk.conf; '
+                . 'systemctl restart dnsmasq; '
+                . 'echo "trunk DHCP enabled"';
+        } else {
+            $cmd = 'sed -i "/^dhcp-range=set:mgmt/d;/^dhcp-option=tag:mgmt/d" /etc/dnsmasq.d/sunipip-trunk.conf; '
+                . 'systemctl restart dnsmasq; '
+                . 'echo "trunk DHCP disabled"';
+        }
+
+        RouterRemoteCommand::create([
+            'router_device_id' => $routerDevice->id,
+            'command' => $cmd,
+            'timeout' => 30,
+            'status' => 'pending',
+        ]);
+
+        $action = $enabled ? '开启' : '关闭';
+        RouterEventLog::create([
+            'router_device_id' => $routerDevice->id,
+            'event_type' => 'trunk_dhcp_toggle',
+            'severity' => 'info',
+            'message' => "管理员{$action}管理段 DHCP",
+            'metadata' => ['enabled' => $enabled, 'operator' => request()->user()?->name],
+            'created_at' => now(),
+        ]);
+
+        return $this->success(null, "管理段 DHCP {$action}命令已下发，等待设备执行");
     }
 
     public function restartService(Request $request, RouterDevice $routerDevice): JsonResponse

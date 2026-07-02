@@ -9,6 +9,7 @@ import (
 	"os/user"
 	"strconv"
 	"strings"
+	"time"
 
 	"sunipip-router-agent/internal/api"
 )
@@ -52,7 +53,17 @@ func (s *FreeRadiusService) Apply(ctx context.Context, cfg api.FreeRadiusConfig,
 		return fmt.Errorf("write dhcp hook: %w", err)
 	}
 
-	s.chownFiles("freerad", freeRadiusAuthorizePath, freeRadiusClientsPath, dhcpHookModulePath)
+	s.chownFiles("freerad", freeRadiusAuthorizePath, freeRadiusClientsPath, dhcpHookModulePath,
+		"/etc/sunipip/dhcp-hosts.conf", dhcpHookScriptPath, "/etc/sunipip/user-ip-pool.conf")
+	os.MkdirAll("/var/log/sunipip", 0755)
+	s.chownFiles("freerad", "/var/log/sunipip")
+	logFile := "/var/log/sunipip/radius-dhcp-hook.log"
+	if _, err := os.Stat(logFile); err == nil {
+		s.chownFiles("freerad", logFile)
+	} else {
+		os.WriteFile(logFile, nil, 0644)
+		s.chownFiles("freerad", logFile)
+	}
 
 	if !s.unitExists(ctx) {
 		s.logger.Warn("freeradius.service unit not found, skipping reload")
@@ -60,6 +71,11 @@ func (s *FreeRadiusService) Apply(ctx context.Context, cfg api.FreeRadiusConfig,
 		s.logger.Info("FreeRadius config changed, restarting")
 		if err := s.reload(ctx); err != nil {
 			return fmt.Errorf("reload freeradius: %w", err)
+		}
+	} else if s.needsRestart(ctx) {
+		s.logger.Info("FreeRadius needs restart (config out of sync)")
+		if err := s.reload(ctx); err != nil {
+			return fmt.Errorf("restart freeradius: %w", err)
 		}
 	} else if !s.IsRunning(ctx) {
 		s.logger.Warn("FreeRadius not running, starting")
@@ -72,6 +88,31 @@ func (s *FreeRadiusService) Apply(ctx context.Context, cfg api.FreeRadiusConfig,
 
 	s.logger.Info("FreeRadius configuration applied successfully")
 	return nil
+}
+
+// needsRestart checks if FreeRadius config files are newer than the running process.
+func (s *FreeRadiusService) needsRestart(ctx context.Context) bool {
+	if !s.IsRunning(ctx) {
+		return false
+	}
+	// Check if dhcp_hook module exists but FreeRadius started before the sites-enabled/default was modified
+	sitesInfo, err := os.Stat("/etc/freeradius/3.0/sites-enabled/default")
+	if err != nil {
+		return false
+	}
+	if _, err := os.Stat(dhcpHookModulePath); err != nil {
+		return false
+	}
+	out, err := exec.CommandContext(ctx, "systemctl", "show", "freeradius", "--property=ActiveEnterTimestamp").Output()
+	if err != nil {
+		return false
+	}
+	ts := strings.TrimPrefix(strings.TrimSpace(string(out)), "ActiveEnterTimestamp=")
+	startTime, err := time.Parse("Mon 2006-01-02 15:04:05 MST", ts)
+	if err != nil {
+		return false
+	}
+	return sitesInfo.ModTime().After(startTime)
 }
 
 // writeAuthorizeIfChanged generates the authorize file and writes it only if
@@ -268,7 +309,9 @@ func (s *FreeRadiusService) writeDHCPHook(cfg api.FreeRadiusConfig) (bool, error
 	}
 
 	// 2. Ensure dhcp_hook is in post-auth section
-	s.ensurePostAuthHook()
+	if s.ensurePostAuthHook() {
+		changed = true
+	}
 
 	// 3. Write user-IP pool config
 	var poolBuf strings.Builder
@@ -332,8 +375,9 @@ func (s *FreeRadiusService) cleanDHCPHosts(validIPs map[string]bool) error {
 			kept = append(kept, line)
 			continue
 		}
-		// Format: dhcp-host=MAC,IP,LEASE
-		parts := strings.Split(trimmed, ",")
+		// Format: MAC,IP,LEASE (migrate from old dhcp-host=MAC,IP,LEASE)
+		cleaned := strings.TrimPrefix(trimmed, "dhcp-host=")
+		parts := strings.Split(cleaned, ",")
 		if len(parts) >= 2 {
 			ip := parts[1]
 			if !validIPs[ip] {
@@ -342,7 +386,10 @@ func (s *FreeRadiusService) cleanDHCPHosts(validIPs map[string]bool) error {
 				continue
 			}
 		}
-		kept = append(kept, line)
+		if cleaned != trimmed {
+			removed++ // count as change to trigger rewrite
+		}
+		kept = append(kept, cleaned)
 	}
 
 	if removed > 0 {
@@ -359,25 +406,59 @@ func (s *FreeRadiusService) cleanDHCPHosts(validIPs map[string]bool) error {
 	return nil
 }
 
-// ensurePostAuthHook adds dhcp_hook to the post-auth section if not present.
-func (s *FreeRadiusService) ensurePostAuthHook() {
+// ensurePostAuthHook ensures dhcp_hook is in the post-auth section (not authenticate).
+// Returns true if the file was modified.
+func (s *FreeRadiusService) ensurePostAuthHook() bool {
 	const sitesDefault = "/etc/freeradius/3.0/sites-enabled/default"
 	data, err := os.ReadFile(sitesDefault)
 	if err != nil {
-		return
+		return false
 	}
 	content := string(data)
-	if strings.Contains(content, "dhcp_hook") {
-		return
+
+	// Find where post-auth section starts
+	postAuthIdx := strings.Index(content, "\npost-auth {")
+	if postAuthIdx < 0 {
+		postAuthIdx = strings.Index(content, "\npost-auth{")
 	}
-	if !strings.Contains(content, "\n\texec\n") {
-		s.logger.Warn("Cannot inject dhcp_hook: expected pattern '\\n\\texec\\n' not found in sites-enabled/default")
-		return
+	if postAuthIdx < 0 {
+		s.logger.Warn("Cannot inject dhcp_hook: post-auth section not found")
+		return false
 	}
-	content = strings.Replace(content, "\n\texec\n", "\n\texec\n\tdhcp_hook\n", 1)
+
+	// Check if dhcp_hook is already in the post-auth section (correct position)
+	postAuthContent := content[postAuthIdx:]
+	if strings.Contains(postAuthContent, "dhcp_hook") {
+		return false
+	}
+
+	// Remove dhcp_hook from wrong position (e.g. authenticate section)
+	if strings.Contains(content, "\tdhcp_hook\n") {
+		content = strings.ReplaceAll(content, "\tdhcp_hook\n", "")
+		s.logger.Info("Removed dhcp_hook from wrong section")
+		// Recalculate post-auth position after removal
+		postAuthIdx = strings.Index(content, "\npost-auth {")
+		if postAuthIdx < 0 {
+			postAuthIdx = strings.Index(content, "\npost-auth{")
+		}
+		if postAuthIdx < 0 {
+			return false
+		}
+	}
+
+	// Find exec in post-auth section and insert after it
+	postAuthContent = content[postAuthIdx:]
+	execIdx := strings.Index(postAuthContent, "\n\texec\n")
+	if execIdx < 0 {
+		s.logger.Warn("Cannot inject dhcp_hook: exec not found in post-auth section")
+		return false
+	}
+	insertPos := postAuthIdx + execIdx + len("\n\texec\n")
+	content = content[:insertPos] + "\tdhcp_hook\n" + content[insertPos:]
 	os.WriteFile(sitesDefault, []byte(content), 0640)
 	s.chownFiles("freerad", sitesDefault)
 	s.logger.Info("Added dhcp_hook to FreeRadius post-auth section")
+	return true
 }
 
 // writeHookScript writes the post-auth DHCP hook shell script.
@@ -390,12 +471,10 @@ func (s *FreeRadiusService) writeHookScript() (bool, error) {
 LOGFILE="/var/log/sunipip/radius-dhcp-hook.log"
 DHCP_HOSTS="/etc/sunipip/dhcp-hosts.conf"
 POOL="/etc/sunipip/user-ip-pool.conf"
-LOCKFILE="/var/lock/sunipip-dhcp-hook.lock"
+LOCKFILE="/tmp/sunipip-dhcp-hook.lock"
 
-mkdir -p /var/log/sunipip
-
-MAC="$CALLING_STATION_ID"
-USER="$USER_NAME"
+MAC=$(echo "$CALLING_STATION_ID" | tr -d '"')
+USER=$(echo "$USER_NAME" | tr -d '"')
 
 log() { echo "$(date '+%Y-%m-%d %H:%M:%S') $1" >> "$LOGFILE"; }
 
@@ -416,7 +495,7 @@ exec 9>"$LOCKFILE"
 flock -w 5 9 || { log "ERROR: lock timeout"; exit 0; }
 
 # Check if this MAC already has an entry
-if grep -q "^dhcp-host=${MAC}," "$DHCP_HOSTS" 2>/dev/null; then
+if grep -q "^${MAC}," "$DHCP_HOSTS" 2>/dev/null; then
     log "EXISTING: mac=$MAC"
     flock -u 9
     exit 0
@@ -437,7 +516,7 @@ IFS=',' read -ra IP_ARRAY <<< "$IPS"
 FOUND=0
 for IP in "${IP_ARRAY[@]}"; do
     if ! grep -q ",${IP}," "$DHCP_HOSTS" 2>/dev/null && ! grep -q ",${IP}$" "$DHCP_HOSTS" 2>/dev/null; then
-        echo "dhcp-host=${MAC},${IP},1h" >> "$DHCP_HOSTS"
+        echo "${MAC},${IP},1h" >> "$DHCP_HOSTS"
         kill -HUP $(pidof dnsmasq) 2>/dev/null
         log "ASSIGNED: user=$USER mac=$MAC ip=$IP"
         FOUND=1
@@ -451,15 +530,15 @@ if [ "$FOUND" = "0" ]; then
     for IP in "${IP_ARRAY[@]}"; do
         OLD_LINE=$(grep ",${IP}," "$DHCP_HOSTS" 2>/dev/null || grep ",${IP}$" "$DHCP_HOSTS" 2>/dev/null)
         if [ -z "$OLD_LINE" ]; then continue; fi
-        OLD_MAC=$(echo "$OLD_LINE" | sed 's/^dhcp-host=//;s/,.*//')
+        OLD_MAC=$(echo "$OLD_LINE" | sed 's/,.*//')
         if [ -z "$OLD_MAC" ]; then continue; fi
         # Check if old MAC is still reachable (in ARP table)
         if ip neigh show 2>/dev/null | grep -qi "$OLD_MAC"; then
             continue
         fi
         # Old MAC is gone — reclaim this IP
-        sed -i "/^dhcp-host=${OLD_MAC},/d" "$DHCP_HOSTS"
-        echo "dhcp-host=${MAC},${IP},1h" >> "$DHCP_HOSTS"
+        sed -i "/^${OLD_MAC},/d" "$DHCP_HOSTS"
+        echo "${MAC},${IP},1h" >> "$DHCP_HOSTS"
         kill -HUP $(pidof dnsmasq) 2>/dev/null
         log "RECLAIMED: user=$USER old_mac=$OLD_MAC new_mac=$MAC ip=$IP"
         FOUND=1

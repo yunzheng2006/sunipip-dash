@@ -22,6 +22,7 @@ type Manager struct {
 	network    *services.NetworkService
 	firewall   *services.FirewallService
 	dhcp       *services.DHCPService
+	ap         *services.APService
 	logger     *slog.Logger
 
 	mu                   sync.RWMutex
@@ -38,12 +39,14 @@ func NewManager(logger *slog.Logger) *Manager {
 		network:    services.NewNetworkService(logger.With("service", "network")),
 		firewall:   services.NewFirewallService(logger.With("service", "firewall")),
 		dhcp:       services.NewDHCPService(logger.With("service", "dhcp")),
+		ap:         services.NewAPService(logger.With("service", "ap")),
 		logger:     logger,
 	}
 }
 
 // Apply applies a full device configuration in the correct order.
-// Order: network -> clash -> firewall -> dhcp -> wireguard -> freeradius
+// Order: network -> AP (must be before DHCP changes) -> clash -> firewall -> dhcp -> wireguard -> freeradius
+// AP config MUST be pushed before DHCP changes to prevent AP losing connectivity.
 // Clash must start BEFORE firewall so tproxy rules have a running backend.
 func (m *Manager) Apply(ctx context.Context, cfg *api.DeviceConfig) error {
 	m.logger.Info("Applying configuration",
@@ -57,32 +60,39 @@ func (m *Manager) Apply(ctx context.Context, cfg *api.DeviceConfig) error {
 		return fmt.Errorf("apply network: %w", err)
 	}
 
-	// 2. Clash proxy — must be running before firewall enables tproxy rules
+	// 2. AP config — push static IP BEFORE DHCP changes to avoid AP losing connectivity
+	if cfg.AP != nil {
+		if err := m.ap.Apply(ctx, *cfg.AP); err != nil {
+			m.logger.Warn("AP config push failed (non-fatal, will retry)", "error", err)
+		}
+	}
+
+	// 3. Clash proxy — must be running before firewall enables tproxy rules
 	if err := m.clash.Apply(ctx, cfg.Clash, cfg.ConfigVersion); err != nil {
 		return fmt.Errorf("apply clash: %w", err)
 	}
 
-	// 3. Firewall rules (depends on interfaces existing, tproxy needs Clash)
+	// 4. Firewall rules (depends on interfaces existing, tproxy needs Clash)
 	if err := m.firewall.Apply(ctx, cfg.Network, cfg.ConfigVersion); err != nil {
 		return fmt.Errorf("apply firewall: %w", err)
 	}
 
-	// 4. DHCP config (depends on interfaces and bridges)
+	// 5. DHCP config (depends on interfaces and bridges)
 	if err := m.dhcp.Apply(ctx, cfg.Network, cfg.ConfigVersion); err != nil {
 		return fmt.Errorf("apply dhcp: %w", err)
 	}
 
-	// 5. WireGuard tunnels
+	// 6. WireGuard tunnels
 	if err := m.wireguard.Apply(ctx, cfg.WireGuard); err != nil {
 		return fmt.Errorf("apply wireguard: %w", err)
 	}
 
-	// 6. FreeRadius (needs VLANs to exist)
+	// 7. FreeRadius (needs VLANs to exist)
 	if err := m.freeradius.Apply(ctx, cfg.FreeRadius, cfg.ConfigVersion); err != nil {
 		return fmt.Errorf("apply freeradius: %w", err)
 	}
 
-	// 7. Local page HTML
+	// 8. Local page HTML
 	if cfg.LocalPage != "" {
 		if err := writeLocalPage(cfg.LocalPage); err != nil {
 			m.logger.Warn("Failed to write local page", "error", err)

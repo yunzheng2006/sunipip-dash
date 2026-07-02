@@ -752,6 +752,7 @@ Route::prefix('v1')->middleware(['auth:sanctum', 'ability:admin', 'log.activity'
     Route::delete('router-wifi-accounts/{accountId}', [RouterDeviceController::class, 'deleteWifiAccount'])->middleware('perm:router.edit');
     Route::post('router-devices/{routerDevice}/reboot', [RouterDeviceController::class, 'rebootDevice'])->middleware('perm:router.edit');
     Route::post('router-devices/{routerDevice}/restart-service', [RouterDeviceController::class, 'restartService'])->middleware('perm:router.edit');
+    Route::post('router-devices/{routerDevice}/toggle-trunk-dhcp', [RouterDeviceController::class, 'toggleTrunkDhcp'])->middleware('perm:router.edit');
     Route::post('router-devices/{routerDevice}/send-command', [RouterDeviceController::class, 'sendCommand'])->middleware('perm:router.edit');
     Route::get('router-devices/{routerDevice}/commands', [RouterDeviceController::class, 'commandHistory'])->middleware('perm:router.view');
     // 路由器产品目录（型号/AP/套餐）

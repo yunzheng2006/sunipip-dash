@@ -150,11 +150,15 @@ func (s *DHCPService) writeTrunkConfig(trunk api.TrunkConfig) error {
 	b.WriteString("# trunk interface (AP management + WiFi clients)\n")
 	b.WriteString(fmt.Sprintf("interface=%s\n", trunk.Interface))
 
-	// AP management DHCP range (tagged 'mgmt' for per-subnet options)
-	b.WriteString(fmt.Sprintf("dhcp-range=set:mgmt,%s,%s,%s,%s\n",
-		trunk.DHCP.RangeStart, trunk.DHCP.RangeEnd, netmask, trunk.DHCP.Lease))
-	b.WriteString(fmt.Sprintf("dhcp-option=tag:mgmt,3,%s\n", gateway))
-	b.WriteString(fmt.Sprintf("dhcp-option=tag:mgmt,6,%s\n", dns))
+	// Management DHCP range — only enabled for v1 (no wifi_subnet).
+	// v2 devices: AP uses static IP, no dynamic range needed.
+	// Keeping mgmt range open on v2 causes WiFi clients to grab 10.20.0.x IPs.
+	if trunk.WifiSubnet == nil || trunk.WifiSubnet.IP == "" {
+		b.WriteString(fmt.Sprintf("dhcp-range=set:mgmt,%s,%s,%s,%s\n",
+			trunk.DHCP.RangeStart, trunk.DHCP.RangeEnd, netmask, trunk.DHCP.Lease))
+		b.WriteString(fmt.Sprintf("dhcp-option=tag:mgmt,3,%s\n", gateway))
+		b.WriteString(fmt.Sprintf("dhcp-option=tag:mgmt,6,%s\n", dns))
+	}
 
 	// v2: WiFi client subnet — static-only DHCP (MACs assigned by RADIUS post-auth hook)
 	if trunk.WifiSubnet != nil && trunk.WifiSubnet.IP != "" {

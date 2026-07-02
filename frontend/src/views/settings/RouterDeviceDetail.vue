@@ -62,6 +62,15 @@
                   {{ device.wifi_version >= 2 ? 'v2 (Flat IP)' : 'v1 (VLAN)' }}
                 </el-tag>
               </el-descriptions-item>
+              <el-descriptions-item label="管理段 DHCP" v-if="device.wifi_version >= 2">
+                <el-button size="small" type="warning" @click="handleToggleTrunkDhcp(true)" :loading="trunkDhcpLoading">
+                  临时开启
+                </el-button>
+                <el-button size="small" @click="handleToggleTrunkDhcp(false)" :loading="trunkDhcpLoading">
+                  关闭
+                </el-button>
+                <span class="text-muted" style="margin-left: 8px; font-size: 12px">开启后可连接 AP 进行管理</span>
+              </el-descriptions-item>
               <el-descriptions-item label="灰度 Agent" v-if="device.target_agent_version">
                 <el-tag type="warning" size="small">{{ device.target_agent_version }}</el-tag>
               </el-descriptions-item>
@@ -85,12 +94,20 @@
         <div style="margin-bottom: 12px">
           <el-button type="primary" size="small" @click="openWifiWizard()" :disabled="!device.customer_id">添加账号</el-button>
         </div>
-        <el-table :data="wifiAccounts" v-loading="wifiLoading" stripe>
+        <el-table :data="paginatedWifi" v-loading="wifiLoading" stripe>
           <el-table-column prop="vlan_id" label="VLAN" width="70" v-if="device.wifi_version < 2" />
           <el-table-column prop="username" label="用户名" width="130" />
           <el-table-column prop="password" label="密码" width="130" />
           <el-table-column prop="label" label="标签" width="120" />
-          <el-table-column prop="ip_prefix" label="子网" width="140" />
+          <el-table-column label="IP 分配" width="200">
+            <template #default="{ row }">
+              <template v-if="device.wifi_version >= 2 && row.ip_start_index >= 2">
+                <span style="font-family: monospace; font-size: 12px">{{ ipRange(row) }}</span>
+                <el-tag size="small" type="info" style="margin-left: 4px">{{ row.max_devices }}台</el-tag>
+              </template>
+              <span v-else>{{ row.ip_prefix }}</span>
+            </template>
+          </el-table-column>
           <el-table-column label="代理模式" width="100">
             <template #default="{ row }">
               <el-tag :type="row.proxy_mode === 'proxy' ? '' : 'info'" size="small">
@@ -120,6 +137,15 @@
             </template>
           </el-table-column>
         </el-table>
+        <div style="margin-top: 12px; display: flex; justify-content: flex-end" v-if="wifiAccounts.length > wifiPageSize">
+          <el-pagination
+            v-model:current-page="wifiPage"
+            :page-size="wifiPageSize"
+            :total="wifiAccounts.length"
+            layout="total, prev, pager, next"
+            small
+          />
+        </div>
       </el-tab-pane>
 
       <!-- WireGuard -->
@@ -327,6 +353,10 @@
           <el-form-item label="登录密码">
             <el-input v-model="wifiForm.password" />
           </el-form-item>
+          <el-form-item label="最大设备数">
+            <el-input-number v-model="wifiForm.max_devices" :min="1" :max="50" />
+            <div style="font-size: 12px; color: #94a3b8; margin-top: 2px">每台设备分配一个独立 /32 IP，创建后不可修改</div>
+          </el-form-item>
         </el-form>
       </div>
 
@@ -489,7 +519,7 @@ import {
   generateInstallToken, bindDevice, unbindDevice, pushConfig,
   getDeviceEvents, getDeviceWifiAccounts, getAvailableSubscriptions,
   createWifiAccount, updateWifiAccount, deleteWifiAccount,
-  rebootDevice, restartService,
+  rebootDevice, restartService, toggleTrunkDhcp,
 } from '@/api/routerDevices'
 
 console.log('OEM Contact edward.sun@as204921.net')
@@ -507,6 +537,12 @@ const activeTab = ref('overview')
 // WiFi
 const wifiAccounts = ref([])
 const wifiLoading = ref(false)
+const wifiPage = ref(1)
+const wifiPageSize = 15
+const paginatedWifi = computed(() => {
+  const start = (wifiPage.value - 1) * wifiPageSize
+  return wifiAccounts.value.slice(start, start + wifiPageSize)
+})
 const availableSubs = ref([])
 const subsLoading = ref(false)
 
@@ -552,6 +588,9 @@ const installCmd = computed(() => installUrl.value ? `curl -fsSL '${installUrl.v
 // WiFi guide
 const wifiGuideVisible = ref(false)
 const wifiGuideAccount = ref(null)
+
+// Trunk DHCP toggle
+const trunkDhcpLoading = ref(false)
 
 // Remote ops
 const restartDialogVisible = ref(false)
@@ -979,6 +1018,23 @@ function showWifiGuide(account) {
   wifiGuideVisible.value = true
 }
 
+async function handleToggleTrunkDhcp(enabled) {
+  const action = enabled ? '开启' : '关闭'
+  await ElMessageBox.confirm(
+    enabled
+      ? '临时开启管理段 DHCP (10.20.0.100-200)，用于连接 AP 进行管理。完成后请手动关闭。'
+      : '关闭管理段 DHCP，WiFi 客户端将仅通过 RADIUS 认证获取业务 IP。',
+    `${action}管理段 DHCP`,
+    { type: enabled ? 'warning' : 'info' }
+  )
+  trunkDhcpLoading.value = true
+  try {
+    const res = await toggleTrunkDhcp(deviceId, { enabled })
+    ElMessage.success(res?.message || `${action}命令已下发`)
+  } catch { /* handled */ }
+  finally { trunkDhcpLoading.value = false }
+}
+
 async function handleReboot() {
   await ElMessageBox.confirm('确认远程重启此设备？设备将暂时离线。', '重启设备', { type: 'warning' })
   try {
@@ -995,6 +1051,15 @@ async function handleRestartService() {
     restartDialogVisible.value = false
   } catch { /* handled */ }
   finally { submitting.value = false }
+}
+
+function ipRange(row) {
+  if (!row.ip_start_index || row.ip_start_index < 2) return row.ip_prefix
+  const base = (10 << 24) | (10 << 16)
+  const first = base + row.ip_start_index
+  const last = first + (row.max_devices || 1) - 1
+  const toIp = n => `${(n >> 24) & 255}.${(n >> 16) & 255}.${(n >> 8) & 255}.${n & 255}`
+  return `${toIp(first)} ~ ${toIp(last)}`
 }
 
 function generateUUID() {

@@ -24,7 +24,7 @@ class RouterConfigService
             'clash' => $this->buildClashConfig($device),
             'wireguard' => $this->buildWireGuardConfig($device),
             'local_page' => $this->buildLocalPageHtml(),
-            'ap_config' => [],
+            'ap_config' => $this->buildApConfig($device),
         ];
     }
 
@@ -236,6 +236,27 @@ class RouterConfigService
         }
 
         return '<!DOCTYPE html><html><head><meta charset="utf-8"><title>SuniPIP Router</title></head><body><h1>SuniPIP Router</h1><p>Local page not found.</p></body></html>';
+    }
+
+    public function buildApConfig(RouterDevice $device): array
+    {
+        $apConfig = $device->ap_config ?? [];
+        $isV2 = ($device->wifi_version ?? 1) >= 2;
+
+        if (!$isV2) {
+            return null;
+        }
+
+        return [
+            'enabled' => true,
+            'wifi_version' => $device->wifi_version ?? 1,
+            'ap_ip' => $device->ap_ip ?? '10.20.0.120',
+            'static_ip' => $isV2 ? '10.20.0.120' : '',
+            'username' => $apConfig['ap_username'] ?? 'root',
+            'password' => $apConfig['ap_password'] ?? 'as204921.net',
+            'router_ip' => '10.20.0.1',
+            'radius_secret' => 'sunipip_radius_secret',
+        ];
     }
 
     public function pushConfig(RouterDevice $device, ?int $userId = null): void

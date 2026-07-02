@@ -73,6 +73,10 @@ export function restartService(id, data) {
 }
 
 
+export function toggleTrunkDhcp(id, data) {
+  return request.post(`/router-devices/${id}/toggle-trunk-dhcp`, data)
+}
+
 export function getAgentVersion() {
   return request.get('/router-devices/agent-version')
 }
