@@ -80,6 +80,7 @@ class DashboardController extends Controller
             'month_spent' => abs($monthSpent),
             'month_topup' => $monthTopup,
             'renew_failed' => $renewFailed,
+            'total_spent' => (float) $customer->total_spent,
             'recent_transactions' => $recentTx,
             'auto_renew_count' => $autoRenewSubs->count(),
             'next_renewal_cost' => round($nextRenewalCost, 2),

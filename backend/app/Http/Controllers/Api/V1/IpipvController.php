@@ -101,7 +101,7 @@ class IpipvController extends Controller
                     $balanceBefore = (float) $customer->balance;
                     $customer->decrement('balance', $deductAmount);
 
-                    \App\Models\Transaction::create([
+                    $purchaseTxn = \App\Models\Transaction::create([
                         'customer_id'    => $customer->id,
                         'type'           => \App\Models\Transaction::TYPE_PURCHASE,
                         'amount'         => -$deductAmount,
@@ -134,6 +134,13 @@ class IpipvController extends Controller
         }
 
         $result = $svc->createOrder($params);
+
+        if (isset($purchaseTxn) && !empty($result['subscription_ids'])) {
+            $purchaseTxn->update([
+                'related_type' => \App\Models\Subscription::class,
+                'related_id'   => $result['subscription_ids'][0],
+            ]);
+        }
 
         if ($paymentMethod === 'balance' && !empty($params['customer_id']) && !empty($params['sale_price']) && empty($params['is_test'])) {
             $durationMonths2 = \App\Support\DurationHelper::toMonths((int) ($params['duration'] ?? 1), (int) ($params['unit'] ?? 3));

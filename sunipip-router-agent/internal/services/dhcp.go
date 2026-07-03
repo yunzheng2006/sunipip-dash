@@ -122,7 +122,7 @@ func (s *DHCPService) writeVLANConfig(vlan api.VLANConfig) error {
 
 	b.WriteString(fmt.Sprintf("dhcp-option=interface:%s,3,%s\n", vlan.Bridge, gateway))
 	b.WriteString(fmt.Sprintf("dhcp-option=interface:%s,6,%s\n", vlan.Bridge, dns))
-	b.WriteString("dhcp-hostsdir=/etc/sunipip/dhcp-hosts.d/\n")
+	b.WriteString("dhcp-hostsfile=/etc/sunipip/dhcp-hosts.d/hosts\n")
 
 	path := filepath.Join(dnsmasqConfigDir, fmt.Sprintf("sunipip-vlan-%d.conf", vlan.VLANID))
 	if err := writeFileAtomic(path, []byte(b.String()), 0644); err != nil {
@@ -182,7 +182,7 @@ func (s *DHCPService) writeTrunkConfig(trunk api.TrunkConfig) error {
 			wifiGateway, wifiNetmask, wifiLease))
 		b.WriteString(fmt.Sprintf("dhcp-option=tag:wifi,3,%s\n", wifiGateway))
 		b.WriteString(fmt.Sprintf("dhcp-option=tag:wifi,6,%s\n", wifiDNS))
-		b.WriteString("dhcp-hostsdir=/etc/sunipip/dhcp-hosts.d/\n")
+		b.WriteString("dhcp-hostsfile=/etc/sunipip/dhcp-hosts.d/hosts\n")
 	}
 
 	path := filepath.Join(dnsmasqConfigDir, "sunipip-trunk.conf")
@@ -272,8 +272,13 @@ func (s *DHCPService) cleanManagedConfigs() error {
 	return nil
 }
 
-// reload restarts the dnsmasq service.
+// reload restarts the dnsmasq service, clearing stale leases first.
 func (s *DHCPService) reload(ctx context.Context) error {
+	for _, lf := range []string{"/var/lib/misc/dnsmasq.leases", "/var/lib/dnsmasq/dnsmasq.leases"} {
+		if err := os.Truncate(lf, 0); err == nil {
+			s.logger.Info("Cleared dnsmasq lease file", "path", lf)
+		}
+	}
 	cmd := exec.CommandContext(ctx, "systemctl", "restart", "dnsmasq")
 	if output, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("systemctl restart dnsmasq: %w (output: %s)", err, string(output))

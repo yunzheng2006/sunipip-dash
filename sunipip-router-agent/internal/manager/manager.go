@@ -213,6 +213,11 @@ MaxRetentionSec=7day
 	}
 }
 
+// CleanStaleHosts removes DHCP host entries for disconnected devices.
+func (m *Manager) CleanStaleHosts(ctx context.Context) {
+	m.freeradius.CleanStaleHosts(ctx)
+}
+
 // NetworkService returns the network service for direct queries.
 func (m *Manager) NetworkService() *services.NetworkService {
 	return m.network

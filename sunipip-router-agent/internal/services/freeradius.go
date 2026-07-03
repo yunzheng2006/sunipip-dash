@@ -1,6 +1,7 @@
 package services
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"log/slog"
@@ -9,6 +10,7 @@ import (
 	"os/user"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"sunipip-router-agent/internal/api"
@@ -57,6 +59,8 @@ func (s *FreeRadiusService) Apply(ctx context.Context, cfg api.FreeRadiusConfig,
 	if err != nil {
 		return fmt.Errorf("write dhcp hook: %w", err)
 	}
+
+	s.writeDnsmasqReloadUnits(ctx)
 
 	s.chownFiles("freerad", freeRadiusAuthorizePath, freeRadiusClientsPath, dhcpHookModulePath,
 		dhcpHostsFilePath, dhcpHookScriptPath, "/etc/sunipip/user-ip-pool.conf", dhcpHostsDirPath, "/etc/sunipip")
@@ -346,7 +350,17 @@ func (s *FreeRadiusService) writeDHCPHook(cfg api.FreeRadiusConfig) (bool, error
 		changed = true
 	}
 
-	// 5. Clean dhcp-hosts.conf: remove entries whose IPs are not in any user's pool
+	// 5. Ensure shared files are writable by freerad (hook runs as freerad user)
+	for _, f := range []string{"/tmp/sunipip-dhcp-hook.lock", "/tmp/sunipip-grace-macs"} {
+		fh, err := os.OpenFile(f, os.O_CREATE|os.O_WRONLY, 0666)
+		if err == nil {
+			fh.Close()
+		}
+		os.Chmod(f, 0666)
+	}
+	os.Chmod(dhcpHostsFilePath, 0777)
+
+	// 6. Clean dhcp-hosts.conf: remove entries whose IPs are not in any user's pool
 	allValidIPs := make(map[string]bool)
 	for _, u := range cfg.Users {
 		for _, ip := range u.AllocatedIPs {
@@ -366,7 +380,7 @@ func (s *FreeRadiusService) cleanDHCPHosts(validIPs map[string]bool) error {
 	data, err := os.ReadFile(dhcpHostsFilePath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			writeFileAtomic(dhcpHostsFilePath, []byte("# Managed by RADIUS post-auth hook\n"), 0644)
+			writeFileAtomic(dhcpHostsFilePath, []byte("# Managed by RADIUS post-auth hook\n"), 0777)
 			return nil
 		}
 		return err
@@ -402,7 +416,7 @@ func (s *FreeRadiusService) cleanDHCPHosts(validIPs map[string]bool) error {
 		if !strings.HasSuffix(newContent, "\n") {
 			newContent += "\n"
 		}
-		if err := writeFileAtomic(dhcpHostsFilePath, []byte(newContent), 0644); err != nil {
+		if err := writeFileAtomic(dhcpHostsFilePath, []byte(newContent), 0777); err != nil {
 			return err
 		}
 		s.logger.Info("Cleaned dhcp-hosts.conf", "removed", removed)
@@ -467,15 +481,16 @@ func (s *FreeRadiusService) ensurePostAuthHook() bool {
 }
 
 // writeHookScript writes the post-auth DHCP hook shell script.
-// Uses dhcp-hostsdir with inotify: dnsmasq auto-detects file changes, no HUP needed.
+// systemd path unit watches the hosts file and sends SIGHUP to dnsmasq.
 func (s *FreeRadiusService) writeHookScript() (bool, error) {
 	script := `#!/bin/bash
 # SuniPIP RADIUS Post-Auth DHCP Hook
-# Maps authenticated MAC to pre-allocated IP via dnsmasq dhcp-hostsdir (inotify auto-reload)
+# Writes MAC→IP to hosts file; systemd path unit sends SIGHUP to dnsmasq.
 
 LOGFILE="/var/log/sunipip/radius-dhcp-hook.log"
 DHCP_HOSTS="/etc/sunipip/dhcp-hosts.d/hosts"
 POOL="/etc/sunipip/user-ip-pool.conf"
+LEASES="/var/lib/misc/dnsmasq.leases"
 LOCKFILE="/tmp/sunipip-dhcp-hook.lock"
 
 MAC=$(echo "$CALLING_STATION_ID" | tr -d '"')
@@ -483,24 +498,22 @@ USER=$(echo "$USER_NAME" | tr -d '"')
 
 log() { echo "$(date '+%Y-%m-%d %H:%M:%S') $1" >> "$LOGFILE"; }
 
-if [ -z "$MAC" ] || [ -z "$USER" ]; then
-    exit 0
-fi
+[ -z "$MAC" ] || [ -z "$USER" ] && exit 0
 
 MAC=$(echo "$MAC" | tr 'A-Z-' 'a-z:' | sed 's/[^a-f0-9:]//g')
+[ -z "$MAC" ] && exit 0
 
-if [ -z "$MAC" ]; then
-    log "ERROR: MAC empty after sanitization"
+# Fast path: if this MAC already has an entry, skip everything
+if grep -q "^${MAC}," "$DHCP_HOSTS" 2>/dev/null; then
     exit 0
 fi
 
-log "AUTH: user=$USER mac=$MAC"
+log "AUTH: user=$USER mac=$MAC (new)"
 
 exec 9>"$LOCKFILE"
 flock -w 5 9 || { log "ERROR: lock timeout"; exit 0; }
 
-# Get user's allocated IPs from pool file
-LINE=$(grep -F "${USER} " "$POOL" 2>/dev/null | grep "^${USER} ")
+LINE=$(awk -v u="$USER" '$1 == u {print; exit}' "$POOL" 2>/dev/null)
 if [ -z "$LINE" ]; then
     log "ERROR: no pool for user=$USER"
     flock -u 9
@@ -510,49 +523,64 @@ fi
 IPS=$(echo "$LINE" | cut -d' ' -f2)
 IFS=',' read -ra IP_ARRAY <<< "$IPS"
 
-# Build working copy: remove this MAC's old entry (handles MAC randomization & account switch)
 TMP="/tmp/sunipip-dhcp-hosts.tmp.$$"
-grep -v "^${MAC}," "$DHCP_HOSTS" > "$TMP" 2>/dev/null || echo "# Managed by RADIUS post-auth hook" > "$TMP"
+cp "$DHCP_HOSTS" "$TMP" 2>/dev/null || echo "# Managed by RADIUS post-auth hook" > "$TMP"
 
-# Clean stale MACs from this user's IPs (not alive in ARP = disconnected)
 is_alive() {
     ip neigh show 2>/dev/null | grep -qi "$1.*\(REACHABLE\|STALE\|DELAY\|PROBE\)"
 }
+
+# Clean stale MACs from this user's IPs
 for IP in "${IP_ARRAY[@]}"; do
-    OLD_MAC=$(grep ",${IP}," "$TMP" 2>/dev/null | head -1 | sed 's/,.*//')
-    [ -z "$OLD_MAC" ] && OLD_MAC=$(grep ",${IP}$" "$TMP" 2>/dev/null | head -1 | sed 's/,.*//')
+    OLD_MAC=$(grep ",${IP}," "$TMP" 2>/dev/null | head -1 | cut -d, -f1)
     [ -z "$OLD_MAC" ] && continue
     if ! is_alive "$OLD_MAC"; then
         grep -v "^${OLD_MAC}," "$TMP" > "${TMP}.2"
         mv "${TMP}.2" "$TMP"
-        log "CLEANED: user=$USER stale_mac=$OLD_MAC ip=$IP"
+        log "CLEANED: stale_mac=$OLD_MAC ip=$IP"
     fi
 done
 
-# Assign first available IP from user's pool
+# Assign first IP that is free in BOTH hosts file AND lease file
 FOUND=0
 for IP in "${IP_ARRAY[@]}"; do
-    if ! grep -q ",${IP}," "$TMP" 2>/dev/null && ! grep -q ",${IP}$" "$TMP" 2>/dev/null; then
-        echo "${MAC},${IP},1h" >> "$TMP"
-        if [ -s "$TMP" ]; then
-            cat "$TMP" > "$DHCP_HOSTS"
-        else
-            log "ERROR: TMP file empty or missing, refusing to truncate hosts"
-        fi
-        rm -f "$TMP"
-        # Add ARP entry immediately to prevent race with concurrent auths
-        IFACE=$(ip -o addr show to "${IP%.*}.0/24" 2>/dev/null | awk '{print $2}' | head -1)
-        [ -z "$IFACE" ] && IFACE=$(ip -o addr show to "10.10.0.0/16" 2>/dev/null | awk '{print $2}' | head -1)
-        [ -n "$IFACE" ] && ip neigh replace "$IP" lladdr "$MAC" dev "$IFACE" nud reachable 2>/dev/null
-        log "ASSIGNED: user=$USER mac=$MAC ip=$IP"
-        FOUND=1
-        break
+    # Skip if IP is in hosts file (assigned to another MAC)
+    grep -q ",${IP}," "$TMP" 2>/dev/null && continue
+    # Skip if IP is leased to a different MAC (avoid lease conflict)
+    LEASE_MAC=$(awk -v ip="$IP" '$3 == ip {print $2}' "$LEASES" 2>/dev/null)
+    if [ -n "$LEASE_MAC" ] && [ "$LEASE_MAC" != "$MAC" ]; then
+        log "SKIP: ip=$IP leased to $LEASE_MAC, trying next"
+        continue
     fi
+    echo "${MAC},${IP},5m" >> "$TMP"
+    cat "$TMP" > "$DHCP_HOSTS"
+    rm -f "$TMP"
+    IFACE=$(ip -o addr show to "${IP%.*}.0/24" 2>/dev/null | awk '{print $2}' | head -1)
+    [ -z "$IFACE" ] && IFACE=$(ip -o addr show to "10.10.0.0/16" 2>/dev/null | awk '{print $2}' | head -1)
+    [ -n "$IFACE" ] && ip neigh replace "$IP" lladdr "$MAC" dev "$IFACE" nud reachable 2>/dev/null
+    # Protect this MAC from cleanup for 120s (device needs time to complete DHCP)
+    echo "${MAC} $(date +%s)" >> /tmp/sunipip-grace-macs
+    log "ASSIGNED: user=$USER mac=$MAC ip=$IP"
+    FOUND=1
+    break
 done
 
 if [ "$FOUND" = "0" ]; then
-    rm -f "$TMP"
-    log "ERROR: all IPs occupied for user=$USER (all holders still alive in ARP)"
+    # All IPs blocked by leases from dead MACs — request restart to clear
+    touch /tmp/sunipip-dnsmasq-restart-needed
+    # Assign the first hosts-free IP anyway; restart will clear the conflicting lease
+    for IP in "${IP_ARRAY[@]}"; do
+        if ! grep -q ",${IP}," "$TMP" 2>/dev/null; then
+            echo "${MAC},${IP},5m" >> "$TMP"
+            cat "$TMP" > "$DHCP_HOSTS"
+            rm -f "$TMP"
+            echo "${MAC} $(date +%s)" >> /tmp/sunipip-grace-macs
+            log "ASSIGNED (restart pending): user=$USER mac=$MAC ip=$IP"
+            FOUND=1
+            break
+        fi
+    done
+    [ "$FOUND" = "0" ] && rm -f "$TMP" && log "ERROR: all IPs occupied for user=$USER"
 fi
 
 flock -u 9
@@ -583,12 +611,216 @@ func (s *FreeRadiusService) migrateDHCPHostsDir() {
 	if err != nil {
 		return
 	}
-	if err := writeFileAtomic(dhcpHostsFilePath, data, 0644); err != nil {
+	if err := writeFileAtomic(dhcpHostsFilePath, data, 0777); err != nil {
 		s.logger.Warn("Failed to migrate dhcp-hosts to dir", "error", err)
 		return
 	}
 	os.Remove(dhcpHostsOldFilePath)
 	s.logger.Info("Migrated dhcp-hosts.conf to dhcp-hosts.d/hosts")
+}
+
+// writeDnsmasqReloadUnits creates a systemd path unit that watches the DHCP
+// hosts file and a oneshot service that sends SIGHUP to dnsmasq on change.
+// This runs as root (systemd), so no sudo needed from the freerad hook.
+func (s *FreeRadiusService) writeDnsmasqReloadUnits(ctx context.Context) {
+	pathUnit := `[Unit]
+Description=Watch SuniPIP DHCP hosts file for changes
+
+[Path]
+PathChanged=/etc/sunipip/dhcp-hosts.d/hosts
+
+[Install]
+WantedBy=multi-user.target
+`
+	serviceUnit := `[Unit]
+Description=Reload dnsmasq after DHCP hosts change
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c 'kill -HUP $(cat /run/dnsmasq/dnsmasq.pid 2>/dev/null || cat /var/run/dnsmasq/dnsmasq.pid 2>/dev/null) 2>/dev/null; true'
+`
+	pathPath := "/etc/systemd/system/sunipip-dnsmasq-reload.path"
+	svcPath := "/etc/systemd/system/sunipip-dnsmasq-reload.service"
+
+	oldPath, _ := os.ReadFile(pathPath)
+	oldSvc, _ := os.ReadFile(svcPath)
+
+	if string(oldPath) == pathUnit && string(oldSvc) == serviceUnit {
+		return
+	}
+
+	os.WriteFile(pathPath, []byte(pathUnit), 0644)
+	os.WriteFile(svcPath, []byte(serviceUnit), 0644)
+
+	exec.CommandContext(ctx, "systemctl", "daemon-reload").Run()
+	exec.CommandContext(ctx, "systemctl", "enable", "--now", "sunipip-dnsmasq-reload.path").Run()
+	s.logger.Info("Installed systemd dnsmasq reload path unit")
+}
+
+// CleanStaleHosts removes hosts entries for MACs no longer present in the ARP table.
+// Respects a grace period: MACs recently assigned by the hook are protected for 120s,
+// giving devices time to complete DHCP and appear in ARP.
+func (s *FreeRadiusService) CleanStaleHosts(ctx context.Context) {
+	data, err := os.ReadFile(dhcpHostsFilePath)
+	if err != nil {
+		return
+	}
+
+	arpMACs := s.getAliveMACs()
+	if arpMACs == nil {
+		return
+	}
+
+	// Read grace-protected MACs (written by hook, protected for 120s)
+	graceMACs := s.loadGraceMACs()
+
+	// Read active leases: MAC → expiry timestamp
+	activeLeases := s.loadActiveLeases()
+
+	var kept []string
+	var cleaned []string
+	scanner := bufio.NewScanner(strings.NewReader(string(data)))
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.HasPrefix(line, "#") || strings.TrimSpace(line) == "" {
+			kept = append(kept, line)
+			continue
+		}
+		mac := strings.SplitN(line, ",", 2)[0]
+		if _, alive := arpMACs[mac]; alive {
+			kept = append(kept, line)
+		} else if _, grace := graceMACs[mac]; grace {
+			kept = append(kept, line)
+		} else if _, leased := activeLeases[mac]; leased {
+			// Not in ARP but lease still active → idle device, keep it
+			kept = append(kept, line)
+		} else {
+			cleaned = append(cleaned, mac)
+		}
+	}
+
+	// Also check for restart flag from hook (all IPs exhausted by lease conflicts)
+	restartFlag := "/tmp/sunipip-dnsmasq-restart-needed"
+	hasRestartFlag := false
+	if _, err := os.Stat(restartFlag); err == nil {
+		hasRestartFlag = true
+		os.Remove(restartFlag)
+	}
+
+	if len(cleaned) == 0 && !hasRestartFlag {
+		return
+	}
+
+	if len(cleaned) > 0 {
+		for _, mac := range cleaned {
+			s.logger.Info("Stale host cleaned", "mac", mac)
+		}
+		content := strings.Join(kept, "\n") + "\n"
+		// Use flock to prevent race with the hook script
+		lockFile, err := os.OpenFile("/tmp/sunipip-dhcp-hook.lock", os.O_CREATE|os.O_WRONLY, 0666)
+		if err == nil {
+			os.Chmod("/tmp/sunipip-dhcp-hook.lock", 0666)
+			syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX)
+			writeFileAtomic(dhcpHostsFilePath, []byte(content), 0777)
+			syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
+			lockFile.Close()
+		}
+		s.logger.Info("Cleaned stale hosts", "removed", len(cleaned), "remaining", len(kept)-1)
+	}
+
+	// Only restart dnsmasq if the hook flagged "all IPs exhausted by leases"
+	// Otherwise the file write above triggers systemd path unit → SIGHUP (hot reload)
+	if hasRestartFlag {
+		for _, lf := range []string{"/var/lib/misc/dnsmasq.leases", "/var/lib/dnsmasq/dnsmasq.leases"} {
+			os.Truncate(lf, 0)
+		}
+		exec.CommandContext(ctx, "systemctl", "restart", "dnsmasq").Run()
+		s.logger.Info("Restarted dnsmasq (all IPs were lease-blocked)")
+	}
+}
+
+// loadGraceMACs reads /tmp/sunipip-grace-macs, returns MACs added within 120s,
+// and rewrites the file to remove expired entries.
+func (s *FreeRadiusService) loadGraceMACs() map[string]struct{} {
+	const gracePath = "/tmp/sunipip-grace-macs"
+	const graceDuration = 120
+	data, err := os.ReadFile(gracePath)
+	if err != nil {
+		return nil
+	}
+	now := time.Now().Unix()
+	result := make(map[string]struct{})
+	var keptLines []string
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		parts := strings.Fields(line)
+		if len(parts) != 2 {
+			continue
+		}
+		ts, err := strconv.ParseInt(parts[1], 10, 64)
+		if err != nil {
+			continue
+		}
+		if now-ts < graceDuration {
+			result[parts[0]] = struct{}{}
+			keptLines = append(keptLines, line)
+		}
+	}
+	// Rewrite to purge expired entries
+	if len(keptLines) > 0 {
+		os.WriteFile(gracePath, []byte(strings.Join(keptLines, "\n")+"\n"), 0777)
+		os.Chmod(gracePath, 0777)
+	} else {
+		os.Remove(gracePath)
+	}
+	return result
+}
+
+// loadActiveLeases reads dnsmasq lease files and returns MACs with non-expired leases.
+// Lease format: expiry_timestamp MAC IP hostname [client_id]
+func (s *FreeRadiusService) loadActiveLeases() map[string]struct{} {
+	result := make(map[string]struct{})
+	now := time.Now().Unix()
+	for _, lf := range []string{"/var/lib/misc/dnsmasq.leases", "/var/lib/dnsmasq/dnsmasq.leases"} {
+		data, err := os.ReadFile(lf)
+		if err != nil {
+			continue
+		}
+		for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+			fields := strings.Fields(line)
+			if len(fields) < 3 {
+				continue
+			}
+			expiry, err := strconv.ParseInt(fields[0], 10, 64)
+			if err != nil {
+				continue
+			}
+			if expiry > now {
+				mac := strings.ToLower(fields[1])
+				result[mac] = struct{}{}
+			}
+		}
+	}
+	return result
+}
+
+func (s *FreeRadiusService) getAliveMACs() map[string]struct{} {
+	out, err := exec.Command("ip", "neigh", "show").Output()
+	if err != nil {
+		return nil
+	}
+	macs := make(map[string]struct{})
+	for _, line := range strings.Split(string(out), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 5 {
+			continue
+		}
+		state := fields[len(fields)-1]
+		if state == "REACHABLE" || state == "STALE" || state == "DELAY" || state == "PROBE" {
+			mac := strings.ToLower(fields[4])
+			macs[mac] = struct{}{}
+		}
+	}
+	return macs
 }
 
 // GetCurrentConfig reads the current authorize file for drift detection.

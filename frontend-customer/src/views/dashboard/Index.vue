@@ -12,10 +12,10 @@
           <div class="kpi-label">待续费</div>
           <div class="kpi-desc">7天内到期的活跃订阅</div>
         </div>
-        <div class="kpi-item" :class="{ clickable: stats.renew_failed > 0 }" @click="stats.renew_failed > 0 && $router.push('/subscriptions?status=expired')">
-          <div class="kpi-num" :class="stats.renew_failed > 0 ? 'danger' : 'safe'">{{ stats.renew_failed || 0 }}</div>
-          <div class="kpi-label">续费失败</div>
-          <div class="kpi-desc">自动续费执行失败的实例数</div>
+        <div class="kpi-item">
+          <div class="kpi-num">¥{{ (stats.total_spent || 0).toFixed(2) }}</div>
+          <div class="kpi-label">累计消费</div>
+          <div class="kpi-desc">账户历史总消费金额</div>
         </div>
       </div>
     </el-card>

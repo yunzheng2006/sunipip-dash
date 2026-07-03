@@ -157,6 +157,13 @@ func main() {
 	// Ensure detailed logging on all services + journal retention
 	mgr.EnsureLogging(ctx)
 
+	// Start stale DHCP host cleanup loop (every 30s, removes disconnected devices)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		staleCleanupLoop(ctx, mgr, logger)
+	}()
+
 	// Start daily maintenance loop (restart FreeRadius + dnsmasq to clear stale state)
 	wg.Add(1)
 	go func() {
@@ -384,6 +391,33 @@ func pullAndApplyConfig(
 
 // maintenanceLoop restarts FreeRadius and dnsmasq daily at 06:00 local time
 // to prevent stale RADIUS/DHCP state that causes WiFi reconnection failures.
+func staleCleanupLoop(ctx context.Context, mgr *manager.Manager, logger *slog.Logger) {
+	logger = logger.With("loop", "stale-cleanup")
+
+	// Wait 2 minutes after startup before first cleanup.
+	// Gives devices time to renew leases after dnsmasq restart during config apply.
+	logger.Info("Stale cleanup waiting 2m startup grace period")
+	select {
+	case <-ctx.Done():
+		return
+	case <-time.After(2 * time.Minute):
+	}
+	logger.Info("Stale cleanup active")
+
+	ticker := time.NewTicker(15 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			logger.Info("Stale cleanup loop stopped")
+			return
+		case <-ticker.C:
+			mgr.CleanStaleHosts(ctx)
+		}
+	}
+}
+
 func maintenanceLoop(
 	ctx context.Context,
 	mgr *manager.Manager,
