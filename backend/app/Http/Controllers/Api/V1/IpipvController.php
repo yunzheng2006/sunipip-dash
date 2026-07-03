@@ -133,7 +133,28 @@ class IpipvController extends Controller
             $params['asset_group_id'] = $group->id;
         }
 
-        $result = $svc->createOrder($params);
+        try {
+            $result = $svc->createOrder($params);
+        } catch (\Exception $e) {
+            if (isset($purchaseTxn)) {
+                $deductAmount = abs((float) $purchaseTxn->amount);
+                $customer = \App\Models\Customer::find($purchaseTxn->customer_id);
+                if ($customer) {
+                    $customer->increment('balance', $deductAmount);
+                    \App\Models\Transaction::create([
+                        'customer_id'    => $customer->id,
+                        'type'           => \App\Models\Transaction::TYPE_REFUND,
+                        'amount'         => $deductAmount,
+                        'balance_before' => (float) $customer->balance - $deductAmount,
+                        'balance_after'  => (float) $customer->balance,
+                        'description'    => "开通失败自动退款 ¥{$deductAmount}",
+                        'operated_by'    => auth()->id(),
+                    ]);
+                }
+            }
+            Log::error('IPIPV provision failed', ['error' => $e->getMessage(), 'params' => $params]);
+            return response()->json(['success' => false, 'message' => '开通失败: ' . $e->getMessage()], 500);
+        }
 
         if (isset($purchaseTxn) && !empty($result['subscription_ids'])) {
             $purchaseTxn->update([
@@ -332,7 +353,26 @@ class IpipvController extends Controller
         }
 
         $svc = app(IpipvProvisionService::class);
-        $svc->syncOrder($order);
+        $result = $svc->syncOrder($order);
+
+        if (!empty($result['subscription_ids'])) {
+            $customerId = $order->request_data['customer_id'] ?? null;
+            if ($customerId) {
+                \App\Models\Transaction::where('customer_id', $customerId)
+                    ->where('type', \App\Models\Transaction::TYPE_PURCHASE)
+                    ->where('description', 'like', '开通订单扣费%')
+                    ->where(function ($q) {
+                        $q->whereNull('related_id')->orWhere('related_id', 0);
+                    })
+                    ->where('created_at', '>=', $order->created_at->subSeconds(2))
+                    ->where('created_at', '<=', $order->created_at->addSeconds(2))
+                    ->first()
+                    ?->update([
+                        'related_type' => \App\Models\Subscription::class,
+                        'related_id'   => $result['subscription_ids'][0],
+                    ]);
+            }
+        }
     }
 
     private function handleInstanceCallback(string $instanceNo): void
