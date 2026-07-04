@@ -103,6 +103,60 @@ class AlipayService
     }
 
     /**
+     * 支付宝交易查询
+     */
+    public function queryTrade(PaymentOrder $order): array
+    {
+        $gateway = $order->gateway;
+        $config = $gateway->config ?? [];
+
+        $appId = $config['app_id'] ?? null;
+        $privateKey = $config['app_private_key'] ?? null;
+
+        if (!$appId || !$privateKey) {
+            throw new \RuntimeException('支付宝网关配置不完整');
+        }
+
+        $bizContent = json_encode([
+            'out_trade_no' => $order->order_no,
+        ], JSON_UNESCAPED_UNICODE);
+
+        $params = [
+            'app_id' => $appId,
+            'method' => 'alipay.trade.query',
+            'format' => 'JSON',
+            'charset' => 'utf-8',
+            'sign_type' => 'RSA2',
+            'timestamp' => date('Y-m-d H:i:s'),
+            'version' => '1.0',
+            'biz_content' => $bizContent,
+        ];
+
+        $params['sign'] = $this->sign($params, $privateKey);
+
+        $response = $this->postToGateway($params);
+
+        $queryResponse = $response['alipay_trade_query_response'] ?? null;
+
+        if ($queryResponse === null) {
+            return ['success' => false, 'code' => 'PARSE_ERROR', 'msg' => '响应格式异常'];
+        }
+
+        $code = $queryResponse['code'] ?? '';
+
+        return [
+            'success' => $code === '10000',
+            'code' => $code,
+            'msg' => $queryResponse['msg'] ?? '',
+            'trade_status' => $queryResponse['trade_status'] ?? null,
+            'trade_no' => $queryResponse['trade_no'] ?? null,
+            'total_amount' => $queryResponse['total_amount'] ?? null,
+            'buyer_logon_id' => $queryResponse['buyer_logon_id'] ?? null,
+            'response' => $queryResponse,
+        ];
+    }
+
+    /**
      * 支付宝退款（同步接口，无异步回调）
      */
     public function refund(

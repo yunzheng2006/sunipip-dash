@@ -26,8 +26,8 @@
           </el-select>
         </el-form-item>
         <el-form-item>
-          <el-button type="primary" @click="fetchData">搜索</el-button>
-          <el-button @click="filterCustomerId = null; filterCountry = ''; fetchData()">重置</el-button>
+          <el-button type="primary" @click="currentPage = 1; fetchData()">搜索</el-button>
+          <el-button @click="filterCustomerId = null; filterCountry = ''; currentPage = 1; fetchData()">重置</el-button>
         </el-form-item>
       </el-form>
     </el-card>
@@ -110,6 +110,19 @@
       </el-card>
     </template>
     <el-empty v-if="!loading && !groupedData.length" description="暂无特批价数据" />
+
+    <div v-if="totalRecords > 0" class="pagination-bar">
+      <span class="pagination-info">共 {{ totalRecords }} 条</span>
+      <el-pagination
+        v-model:current-page="currentPage"
+        :page-size="pageSize"
+        :total="totalRecords"
+        :page-sizes="[20, 50, 100]"
+        layout="sizes, prev, pager, next"
+        @size-change="onPageSizeChange"
+        @current-change="fetchData"
+      />
+    </div>
 
     <!-- ===== 创建/编辑弹窗（Wizard 风格）===== -->
     <el-dialog v-model="dialogVisible" :title="editing ? '编辑特批价' : '添加特批价'" width="900px" :close-on-click-modal="false" class="wizard-dialog">
@@ -333,6 +346,9 @@ const maxDiscountLimit = computed(() => authStore.user?.max_discount_percent || 
 
 const loading = ref(false)
 const rawData = ref([])
+const currentPage = ref(1)
+const pageSize = ref(20)
+const totalRecords = ref(0)
 const filterCustomerId = ref(null)
 const filterCountry = ref('')
 const customerOptions = ref([])
@@ -475,13 +491,21 @@ async function searchCustomers(kw) {
   } catch {} finally { customerLoading.value = false }
 }
 
+function onPageSizeChange(size) {
+  pageSize.value = size
+  currentPage.value = 1
+  fetchData()
+}
+
 async function fetchData() {
   loading.value = true
   try {
-    const params = {}
+    const params = { page: currentPage.value, per_page: pageSize.value }
     if (filterCustomerId.value) params.customer_id = filterCustomerId.value
     if (filterCountry.value) params.country_code = filterCountry.value
-    rawData.value = (await getCustomerSpecialPrices(params)) || []
+    const res = (await getCustomerSpecialPrices(params)) || {}
+    rawData.value = res.items || []
+    totalRecords.value = res.total || 0
   } catch {} finally { loading.value = false }
 }
 
@@ -662,6 +686,12 @@ $border: #E2E8F0;
       display: flex; align-items: center;
       &__name { font-size: 15px; font-weight: 600; color: #303133; }
     }
+  }
+
+  .pagination-bar {
+    display: flex; align-items: center; justify-content: flex-end; gap: 12px;
+    margin-top: 16px; padding: 8px 0;
+    .pagination-info { font-size: 13px; color: #909399; }
   }
 }
 

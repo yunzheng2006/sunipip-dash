@@ -33,7 +33,16 @@ class CustomerSpecialPriceController extends Controller
             });
         }
 
-        return $this->success($query->orderBy('customer_id')->orderByDesc('id')->get());
+        $perPage = (int) $request->input('per_page', 20);
+        $perPage = min(max($perPage, 1), 100);
+        $paginated = $query->orderBy('customer_id')->orderByDesc('id')->paginate($perPage);
+
+        return $this->success([
+            'items' => $paginated->items(),
+            'total' => $paginated->total(),
+            'page'  => $paginated->currentPage(),
+            'pages' => $paginated->lastPage(),
+        ]);
     }
 
     public function store(Request $request): JsonResponse

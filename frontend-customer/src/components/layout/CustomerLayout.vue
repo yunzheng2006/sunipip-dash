@@ -606,7 +606,7 @@ $tabH: 56px;
   align-items: center;
 
   .topbar-logo-img {
-    height: 48px;
+    height: 64px;
     object-fit: contain;
     border-radius: 8px;
   }

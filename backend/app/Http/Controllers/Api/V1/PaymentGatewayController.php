@@ -121,7 +121,7 @@ class PaymentGatewayController extends Controller
     public static function getCallbackDomain(): string
     {
         $domain = SystemConfig::get('payment.callback_domain', '');
-        return $domain ?: rtrim(config('app.url', 'https://api-all.sunipip.com'), '/');
+        return $domain ?: rtrim(config('app.url', 'https://api-all.sunip.cc'), '/');
     }
 
     public static function getReturnDomain(): string

@@ -5,7 +5,7 @@
 #
 # Target: Debian 12 industrial PC (N2940, 4GB RAM, 32GB SSD, 4 NICs)
 # Usage:
-#   curl -fsSL https://api-all.sunipip.com/api/v1/router-install/{token} | bash
+#   curl -fsSL https://api-all.sunip.cc/api/v1/router-install/{token} | bash
 #
 # The INSTALL_TOKEN is either set as an environment variable or extracted
 # from the download URL by the platform (injected into the script).
@@ -16,7 +16,7 @@ set -euo pipefail
 # Constants
 # ---------------------------------------------------------------------------
 AGENT_VERSION="1.0.10"
-PLATFORM_URL="${PLATFORM_URL:-https://api-all.sunipip.com}"
+PLATFORM_URL="${PLATFORM_URL:-https://api-all.sunip.cc}"
 LOG_FILE="/var/log/sunipip-install.log"
 CLASH_VERSION="v1.19.25"
 CLASH_URL="https://github.com/MetaCubeX/mihomo/releases/download/${CLASH_VERSION}/mihomo-linux-amd64-compatible-${CLASH_VERSION}.gz"
@@ -622,7 +622,7 @@ fi
 cat > /etc/systemd/system/sunipip-router-agent.service <<'AGENT_SVC_EOF'
 [Unit]
 Description=SuniPIP Router Agent
-Documentation=https://api-all.sunipip.com
+Documentation=https://api-all.sunip.cc
 After=network.target wg-quick@wg0.service
 
 [Service]

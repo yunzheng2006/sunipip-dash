@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 )
 
@@ -85,6 +86,13 @@ func (s *Store) Load() error {
 	}
 	if cfg.LocalAPIListen == "" {
 		cfg.LocalAPIListen = "0.0.0.0:8080"
+	}
+
+	// Migrate platform URL: api-all.sunipip.com → api-all.sunip.cc
+	if strings.Contains(cfg.PlatformURL, "sunipip.com") {
+		cfg.PlatformURL = strings.Replace(cfg.PlatformURL, "api-all.sunipip.com", "api-all.sunip.cc", 1)
+		data, _ := json.MarshalIndent(&cfg, "", "  ")
+		os.WriteFile(s.path, data, 0600)
 	}
 
 	s.mu.Lock()

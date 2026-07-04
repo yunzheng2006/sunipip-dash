@@ -526,22 +526,8 @@ IFS=',' read -ra IP_ARRAY <<< "$IPS"
 TMP="/tmp/sunipip-dhcp-hosts.tmp.$$"
 cp "$DHCP_HOSTS" "$TMP" 2>/dev/null || echo "# Managed by RADIUS post-auth hook" > "$TMP"
 
-is_alive() {
-    ip neigh show 2>/dev/null | grep -qi "$1.*\(REACHABLE\|STALE\|DELAY\|PROBE\)"
-}
-
-# Clean stale MACs from this user's IPs
-for IP in "${IP_ARRAY[@]}"; do
-    OLD_MAC=$(grep ",${IP}," "$TMP" 2>/dev/null | head -1 | cut -d, -f1)
-    [ -z "$OLD_MAC" ] && continue
-    if ! is_alive "$OLD_MAC"; then
-        grep -v "^${OLD_MAC}," "$TMP" > "${TMP}.2"
-        mv "${TMP}.2" "$TMP"
-        log "CLEANED: stale_mac=$OLD_MAC ip=$IP"
-    fi
-done
-
 # Assign first IP that is free in BOTH hosts file AND lease file
+# Note: stale entry cleanup is handled by the agent's CleanStaleHosts (checks ARP + lease + grace)
 FOUND=0
 for IP in "${IP_ARRAY[@]}"; do
     # Skip if IP is in hosts file (assigned to another MAC)
@@ -552,7 +538,7 @@ for IP in "${IP_ARRAY[@]}"; do
         log "SKIP: ip=$IP leased to $LEASE_MAC, trying next"
         continue
     fi
-    echo "${MAC},${IP},5m" >> "$TMP"
+    echo "${MAC},${IP},30m" >> "$TMP"
     cat "$TMP" > "$DHCP_HOSTS"
     rm -f "$TMP"
     IFACE=$(ip -o addr show to "${IP%.*}.0/24" 2>/dev/null | awk '{print $2}' | head -1)
@@ -571,7 +557,7 @@ if [ "$FOUND" = "0" ]; then
     # Assign the first hosts-free IP anyway; restart will clear the conflicting lease
     for IP in "${IP_ARRAY[@]}"; do
         if ! grep -q ",${IP}," "$TMP" 2>/dev/null; then
-            echo "${MAC},${IP},5m" >> "$TMP"
+            echo "${MAC},${IP},30m" >> "$TMP"
             cat "$TMP" > "$DHCP_HOSTS"
             rm -f "$TMP"
             echo "${MAC} $(date +%s)" >> /tmp/sunipip-grace-macs
@@ -731,11 +717,41 @@ func (s *FreeRadiusService) CleanStaleHosts(ctx context.Context) {
 	// Only restart dnsmasq if the hook flagged "all IPs exhausted by leases"
 	// Otherwise the file write above triggers systemd path unit → SIGHUP (hot reload)
 	if hasRestartFlag {
+		// Protect all MACs currently in hosts: after lease truncation they lose lease protection,
+		// but they might be valid idle devices. Grace gives them 120s to renew after restart.
+		s.graceProtectCurrentHosts()
 		for _, lf := range []string{"/var/lib/misc/dnsmasq.leases", "/var/lib/dnsmasq/dnsmasq.leases"} {
 			os.Truncate(lf, 0)
 		}
 		exec.CommandContext(ctx, "systemctl", "restart", "dnsmasq").Run()
 		s.logger.Info("Restarted dnsmasq (all IPs were lease-blocked)")
+	}
+}
+
+// graceProtectCurrentHosts writes all MACs currently in the hosts file to the grace file.
+// Called before lease truncation + dnsmasq restart to prevent cleanup from removing
+// valid idle devices that temporarily lose both ARP and lease protection.
+func (s *FreeRadiusService) graceProtectCurrentHosts() {
+	const gracePath = "/tmp/sunipip-grace-macs"
+	data, err := os.ReadFile(dhcpHostsFilePath)
+	if err != nil {
+		return
+	}
+	now := fmt.Sprintf("%d", time.Now().Unix())
+	var lines []string
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		mac := strings.SplitN(line, ",", 2)[0]
+		lines = append(lines, mac+" "+now)
+	}
+	if len(lines) > 0 {
+		existing, _ := os.ReadFile(gracePath)
+		content := string(existing) + strings.Join(lines, "\n") + "\n"
+		os.WriteFile(gracePath, []byte(content), 0666)
+		os.Chmod(gracePath, 0666)
 	}
 }
 

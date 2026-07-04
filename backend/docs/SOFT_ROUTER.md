@@ -47,7 +47,7 @@ Internet ← eth0 (WAN: DHCP/PPPoE)
 
 ## 二、API 参考
 
-Base URL: `https://api-all.sunipip.com/api/v1`
+Base URL: `https://api-all.sunip.cc/api/v1`
 
 ### 2.1 设备 Agent API (公开, 无需登录)
 
@@ -333,7 +333,7 @@ Agent 配置: `/etc/sunipip/agent.json`
 {
   "device_id": 42,
   "agent_key": "rtr_abc123...",
-  "platform_url": "https://api-all.sunipip.com",
+  "platform_url": "https://api-all.sunip.cc",
   "heartbeat_interval_seconds": 60,
   "config_poll_interval_seconds": 30,
   "local_api_listen": "172.10.0.1:8080",
@@ -467,12 +467,12 @@ live_pc → live_pc_dedicated, live_pc_shared
 # 编译 Agent
 cd sunipip-router-agent && GOOS=linux GOARCH=amd64 go build -o sunipip-router-agent-linux-amd64 cmd/agent/main.go
 # 上传到服务器
-scp sunipip-router-agent-linux-amd64 root@47.84.199.147:/www/wwwroot/api-all.sunipip.com/storage/app/router-downloads/
+scp sunipip-router-agent-linux-amd64 root@47.84.199.147:/www/wwwroot/api-all.sunip.cc/storage/app/router-downloads/
 
 # 编译前端
 cd frontend-router && npm run build
 tar -czf router-frontend-dist.tar.gz -C dist .
-scp router-frontend-dist.tar.gz root@47.84.199.147:/www/wwwroot/api-all.sunipip.com/storage/app/router-downloads/
+scp router-frontend-dist.tar.gz root@47.84.199.147:/www/wwwroot/api-all.sunip.cc/storage/app/router-downloads/
 ```
 
 ---
