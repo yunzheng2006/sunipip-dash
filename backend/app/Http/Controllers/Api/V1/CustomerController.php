@@ -530,9 +530,10 @@ class CustomerController extends Controller
         $referralService = app(\App\Services\ReferralService::class);
         $rate = $referralService->getCommissionRate('purchase');
 
-        // 计算追溯返佣：该客户所有订阅的 price 总和（含管理后台开通 + 客户自助购买 + 续费）
+        // 计算追溯返佣：该客户所有非测试订阅的 price 总和
         $purchaseTotal = (float) \App\Models\Subscription::where('customer_id', $customer->id)
             ->whereIn('status', ['active', 'expired', 'cancelled'])
+            ->where('is_test', 0)
             ->sum('price');
         $retroCommission = round($purchaseTotal * $rate / 100, 2);
 

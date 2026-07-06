@@ -38,6 +38,11 @@ class ReferralService
         if (!$this->isEnabled()) return 0;
         if ($amount <= 0) return 0;
 
+        if ($triggerId) {
+            $isTest = \App\Models\Subscription::where('id', $triggerId)->value('is_test');
+            if ($isTest) return 0;
+        }
+
         $referrerId = $customer->referred_by_customer;
         if (!$referrerId) return 0;
 
@@ -339,6 +344,11 @@ class ReferralService
     {
         if (!$this->isSalesCommissionEnabled()) return;
         if ($amount <= 0) return;
+
+        if ($triggerId) {
+            $isTest = \App\Models\Subscription::where('id', $triggerId)->value('is_test');
+            if ($isTest) return;
+        }
 
         $isSpecial = $this->hasSpecialPricing($customer);
 
