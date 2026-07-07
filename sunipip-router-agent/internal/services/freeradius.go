@@ -552,9 +552,34 @@ for IP in "${IP_ARRAY[@]}"; do
 done
 
 if [ "$FOUND" = "0" ]; then
+    # All IPs in hosts or leased — try to reclaim an IP whose MAC is no longer in ARP
+    IFACE=$(ip -o addr show to "10.10.0.0/16" 2>/dev/null | awk '{print $2}' | head -1)
+    if [ -n "$IFACE" ]; then
+        ARP_MACS=$(ip neigh show dev "$IFACE" 2>/dev/null | grep -iv FAILED | awk '{print $5}')
+        if [ -n "$ARP_MACS" ]; then
+            for IP in "${IP_ARRAY[@]}"; do
+                OLD_MAC=$(grep ",${IP}," "$TMP" 2>/dev/null | head -1 | cut -d',' -f1)
+                [ -z "$OLD_MAC" ] && continue
+                if ! echo "$ARP_MACS" | grep -qi "$OLD_MAC"; then
+                    grep -v "^${OLD_MAC},${IP}," "$TMP" > "${TMP}.new"
+                    echo "${MAC},${IP},30m" >> "${TMP}.new"
+                    cat "${TMP}.new" > "$DHCP_HOSTS"
+                    rm -f "$TMP" "${TMP}.new"
+                    ip neigh replace "$IP" lladdr "$MAC" dev "$IFACE" nud reachable 2>/dev/null
+                    echo "${MAC} $(date +%s)" >> /tmp/sunipip-grace-macs
+                    touch /tmp/sunipip-dnsmasq-restart-needed
+                    log "REPLACED: dead=$OLD_MAC new=$MAC ip=$IP"
+                    FOUND=1
+                    break
+                fi
+            done
+        fi
+    fi
+fi
+
+if [ "$FOUND" = "0" ]; then
     # All IPs blocked by leases from dead MACs — request restart to clear
     touch /tmp/sunipip-dnsmasq-restart-needed
-    # Assign the first hosts-free IP anyway; restart will clear the conflicting lease
     for IP in "${IP_ARRAY[@]}"; do
         if ! grep -q ",${IP}," "$TMP" 2>/dev/null; then
             echo "${MAC},${IP},30m" >> "$TMP"
