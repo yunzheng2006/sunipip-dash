@@ -40,7 +40,10 @@
       <el-card class="section-card" shadow="never">
         <div class="section-head">
           <span class="section-title">WiFi 账号</span>
-          <el-button type="primary" size="small" @click="openWizard()">添加账号</el-button>
+          <div style="display: flex; gap: 8px">
+            <el-button type="warning" size="small" @click="handleCleanStale()" :loading="cleaningStale" :disabled="device?.wifi_version < 2" plain>一键清理残留连接</el-button>
+            <el-button type="primary" size="small" @click="openWizard()">添加账号</el-button>
+          </div>
         </div>
 
         <div v-if="wifiAccounts.length === 0" class="empty-state">
@@ -252,7 +255,7 @@ import { Loading } from '@element-plus/icons-vue'
 import {
   getDevice, getWifiAccounts, createWifiAccount,
   updateWifiAccount, deleteWifiAccount, getAvailableSubscriptions, getDeviceStatus,
-  getWifiProfile,
+  getWifiProfile, cleanStaleConnections,
 } from '@/api/router'
 
 const route = useRoute()
@@ -267,6 +270,22 @@ const submitting = ref(false)
 const wifiAccounts = ref([])
 const availableSubs = ref([])
 const subsLoading = ref(false)
+
+// Clean stale connections
+const cleaningStale = ref(false)
+async function handleCleanStale() {
+  await ElMessageBox.confirm(
+    '将清理设备上不活跃的连接，释放 IP 给新设备使用。正在使用中的设备不会受影响。',
+    '一键清理残留连接',
+    { type: 'warning', confirmButtonText: '确认清理', cancelButtonText: '取消' }
+  )
+  cleaningStale.value = true
+  try {
+    await cleanStaleConnections(deviceId)
+    ElMessage.success('清理命令已发送，请稍等片刻后重新连接 WiFi')
+  } catch { /* handled */ }
+  finally { cleaningStale.value = false }
+}
 
 // Config sync polling
 const configSyncing = ref(false)

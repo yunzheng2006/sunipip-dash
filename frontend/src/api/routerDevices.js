@@ -77,6 +77,10 @@ export function toggleTrunkDhcp(id, data) {
   return request.post(`/router-devices/${id}/toggle-trunk-dhcp`, data)
 }
 
+export function cleanStaleConnections(id) {
+  return request.post(`/router-devices/${id}/clean-stale-connections`)
+}
+
 export function getAgentVersion() {
   return request.get('/router-devices/agent-version')
 }

@@ -39,3 +39,7 @@ export function getDeviceStatus(deviceId) {
 export function getWifiProfile(accountId) {
   return request.get(`/router/wifi-accounts/${accountId}/ios-profile`, { responseType: 'blob' })
 }
+
+export function cleanStaleConnections(deviceId) {
+  return request.post(`/router/devices/${deviceId}/clean-stale-connections`)
+}

@@ -552,28 +552,27 @@ for IP in "${IP_ARRAY[@]}"; do
 done
 
 if [ "$FOUND" = "0" ]; then
-    # All IPs in hosts or leased — try to reclaim an IP whose MAC is no longer in ARP
+    # All IPs in hosts or leased — try to reclaim an IP whose MAC is no longer actively connected
     IFACE=$(ip -o addr show to "10.10.0.0/16" 2>/dev/null | awk '{print $2}' | head -1)
     if [ -n "$IFACE" ]; then
-        ARP_MACS=$(ip neigh show dev "$IFACE" 2>/dev/null | grep -iv FAILED | awk '{print $5}')
-        if [ -n "$ARP_MACS" ]; then
-            for IP in "${IP_ARRAY[@]}"; do
-                OLD_MAC=$(grep ",${IP}," "$TMP" 2>/dev/null | head -1 | cut -d',' -f1)
-                [ -z "$OLD_MAC" ] && continue
-                if ! echo "$ARP_MACS" | grep -qi "$OLD_MAC"; then
-                    grep -v "^${OLD_MAC},${IP}," "$TMP" > "${TMP}.new"
-                    echo "${MAC},${IP},30m" >> "${TMP}.new"
-                    cat "${TMP}.new" > "$DHCP_HOSTS"
-                    rm -f "$TMP" "${TMP}.new"
-                    ip neigh replace "$IP" lladdr "$MAC" dev "$IFACE" nud reachable 2>/dev/null
-                    echo "${MAC} $(date +%s)" >> /tmp/sunipip-grace-macs
-                    touch /tmp/sunipip-dnsmasq-restart-needed
-                    log "REPLACED: dead=$OLD_MAC new=$MAC ip=$IP"
-                    FOUND=1
-                    break
-                fi
-            done
-        fi
+        # Only REACHABLE MACs are considered alive; STALE/FAILED/etc can be replaced
+        ARP_MACS=$(ip neigh show dev "$IFACE" 2>/dev/null | grep -i REACHABLE | awk '{print $5}')
+        for IP in "${IP_ARRAY[@]}"; do
+            OLD_MAC=$(grep ",${IP}," "$TMP" 2>/dev/null | head -1 | cut -d',' -f1)
+            [ -z "$OLD_MAC" ] && continue
+            if [ -z "$ARP_MACS" ] || ! echo "$ARP_MACS" | grep -qi "$OLD_MAC"; then
+                grep -v "^${OLD_MAC},${IP}," "$TMP" > "${TMP}.new"
+                echo "${MAC},${IP},30m" >> "${TMP}.new"
+                cat "${TMP}.new" > "$DHCP_HOSTS"
+                rm -f "$TMP" "${TMP}.new"
+                ip neigh replace "$IP" lladdr "$MAC" dev "$IFACE" nud reachable 2>/dev/null
+                echo "${MAC} $(date +%s)" >> /tmp/sunipip-grace-macs
+                touch /tmp/sunipip-dnsmasq-restart-needed
+                log "REPLACED: dead=$OLD_MAC new=$MAC ip=$IP"
+                FOUND=1
+                break
+            fi
+        done
     fi
 fi
 
@@ -856,7 +855,7 @@ func (s *FreeRadiusService) getAliveMACs() map[string]struct{} {
 			continue
 		}
 		state := fields[len(fields)-1]
-		if state == "REACHABLE" || state == "STALE" || state == "DELAY" || state == "PROBE" {
+		if state == "REACHABLE" || state == "DELAY" {
 			mac := strings.ToLower(fields[4])
 			macs[mac] = struct{}{}
 		}

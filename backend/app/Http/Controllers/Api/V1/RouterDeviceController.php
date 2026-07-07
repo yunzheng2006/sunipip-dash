@@ -439,6 +439,82 @@ class RouterDeviceController extends Controller
         return $this->success(null, "服务 {$data['service']} 重启命令已发送");
     }
 
+    public function cleanStaleConnections(Request $request, RouterDevice $routerDevice): JsonResponse
+    {
+        if ($routerDevice->status === 'decommissioned') {
+            return $this->error('设备已停用', 422);
+        }
+
+        if ($routerDevice->wifi_version < 2) {
+            return $this->error('此功能仅支持 WiFi v2 设备', 422);
+        }
+
+        $cmd = <<<'BASH'
+#!/bin/bash
+HOSTS_FILE="/etc/sunipip/dhcp-hosts.d/hosts"
+LEASE_FILE="/var/lib/misc/dnsmasq.leases"
+IFACE=$(ip -o addr show to "10.10.0.0/16" 2>/dev/null | awk '{print $2}' | head -1)
+[ -z "$IFACE" ] && echo '{"error":"no wifi interface found"}' && exit 1
+[ ! -f "$HOSTS_FILE" ] && echo '{"error":"hosts file not found"}' && exit 1
+
+REACHABLE_MACS=$(ip neigh show dev "$IFACE" 2>/dev/null | grep -i REACHABLE | awk '{print tolower($5)}')
+NOW=$(date +%s)
+ACTIVE_LEASE_MACS=""
+if [ -f "$LEASE_FILE" ]; then
+    while IFS=' ' read -r expiry mac ip _ _; do
+        [ "$expiry" -gt "$NOW" ] 2>/dev/null && ACTIVE_LEASE_MACS="$ACTIVE_LEASE_MACS $(echo "$mac" | tr 'A-Z' 'a-z')"
+    done < "$LEASE_FILE"
+fi
+
+KEPT=0
+CLEANED=0
+CLEANED_MACS=""
+TMP=$(mktemp)
+while IFS= read -r line; do
+    [ -z "$line" ] && continue
+    MAC=$(echo "$line" | cut -d',' -f1 | tr 'A-Z' 'a-z')
+    IS_ALIVE=0
+    echo "$REACHABLE_MACS" | grep -qi "$MAC" && IS_ALIVE=1
+    [ "$IS_ALIVE" = "0" ] && echo "$ACTIVE_LEASE_MACS" | grep -qi "$MAC" && IS_ALIVE=1
+    if [ "$IS_ALIVE" = "1" ]; then
+        echo "$line" >> "$TMP"
+        KEPT=$((KEPT + 1))
+    else
+        CLEANED=$((CLEANED + 1))
+        CLEANED_MACS="$CLEANED_MACS $MAC"
+    fi
+done < "$HOSTS_FILE"
+
+if [ "$CLEANED" -gt "0" ]; then
+    cat "$TMP" > "$HOSTS_FILE"
+    # Clear leases and restart dnsmasq to free IPs
+    > "$LEASE_FILE"
+    systemctl restart dnsmasq 2>/dev/null
+fi
+rm -f "$TMP"
+
+echo "{\"kept\":$KEPT,\"cleaned\":$CLEANED,\"cleaned_macs\":\"$(echo $CLEANED_MACS | xargs)\"}"
+BASH;
+
+        RouterRemoteCommand::create([
+            'router_device_id' => $routerDevice->id,
+            'command' => $cmd,
+            'timeout' => 30,
+            'status' => 'pending',
+        ]);
+
+        RouterEventLog::create([
+            'router_device_id' => $routerDevice->id,
+            'event_type' => 'clean_stale_connections',
+            'severity' => 'info',
+            'message' => '清理残留连接',
+            'metadata' => ['operator' => $request->user()?->name ?? 'customer'],
+            'created_at' => now(),
+        ]);
+
+        return $this->success(null, '清理命令已下发，设备将在下次心跳时执行');
+    }
+
     public function getApDiscovery(RouterDevice $routerDevice): JsonResponse
     {
         $lastError = null;

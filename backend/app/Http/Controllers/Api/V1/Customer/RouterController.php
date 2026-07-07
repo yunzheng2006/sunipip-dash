@@ -4,6 +4,8 @@ namespace App\Http\Controllers\Api\V1\Customer;
 
 use App\Http\Controllers\Controller;
 use App\Models\RouterDevice;
+use App\Models\RouterEventLog;
+use App\Models\RouterRemoteCommand;
 use App\Models\RouterWifiAccount;
 use App\Models\Subscription;
 use App\Services\Router\RouterProvisionService;
@@ -319,6 +321,23 @@ class RouterController extends Controller
         return response($xml, 200)
             ->header('Content-Type', 'application/x-apple-aspen-config')
             ->header('Content-Disposition', 'attachment; filename="' . $filename . '"');
+    }
+
+    public function cleanStaleConnections(Request $request, $id): JsonResponse
+    {
+        $customer = $request->user();
+        $device = RouterDevice::where('id', $id)->where('customer_id', $customer->id)->first();
+
+        if (!$device) {
+            return $this->error('设备不存在', 404);
+        }
+
+        if ($device->wifi_version < 2) {
+            return $this->error('此功能仅支持 WiFi v2 设备', 422);
+        }
+
+        $adminController = app(\App\Http\Controllers\Api\V1\RouterDeviceController::class);
+        return $adminController->cleanStaleConnections($request, $device);
     }
 
 }

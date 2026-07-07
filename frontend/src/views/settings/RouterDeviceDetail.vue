@@ -94,8 +94,9 @@
 
       <!-- WiFi 账号 -->
       <el-tab-pane label="WiFi 账号" name="wifi">
-        <div style="margin-bottom: 12px">
+        <div style="margin-bottom: 12px; display: flex; gap: 8px">
           <el-button type="primary" size="small" @click="openWifiWizard()" :disabled="!device.customer_id">添加账号</el-button>
+          <el-button type="warning" size="small" @click="handleCleanStale()" :loading="cleaningStale" :disabled="device.wifi_version < 2" plain>一键清理残留连接</el-button>
         </div>
         <el-table :data="paginatedWifi" v-loading="wifiLoading" stripe>
           <el-table-column prop="vlan_id" label="VLAN" width="70" v-if="device.wifi_version < 2" />
@@ -526,7 +527,7 @@ import {
   generateInstallToken, bindDevice, unbindDevice, pushConfig,
   getDeviceEvents, getDeviceWifiAccounts, getAvailableSubscriptions,
   createWifiAccount, updateWifiAccount, deleteWifiAccount,
-  rebootDevice, restartService, toggleTrunkDhcp,
+  rebootDevice, restartService, toggleTrunkDhcp, cleanStaleConnections,
 } from '@/api/routerDevices'
 
 console.log('OEM Contact edward.sun@as204921.net')
@@ -598,6 +599,22 @@ const wifiGuideAccount = ref(null)
 
 // Trunk DHCP toggle
 const trunkDhcpLoading = ref(false)
+
+// Clean stale connections
+const cleaningStale = ref(false)
+async function handleCleanStale() {
+  await ElMessageBox.confirm(
+    '将清理设备上所有不活跃的 MAC 连接，释放 IP 给新设备。正在使用中的设备不会受影响。',
+    '一键清理残留连接',
+    { type: 'warning', confirmButtonText: '确认清理', cancelButtonText: '取消' }
+  )
+  cleaningStale.value = true
+  try {
+    await cleanStaleConnections(deviceId)
+    ElMessage.success('清理命令已下发，设备将在下次心跳时执行')
+  } catch { /* handled */ }
+  finally { cleaningStale.value = false }
+}
 
 // Remote ops
 const restartDialogVisible = ref(false)
