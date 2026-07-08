@@ -404,16 +404,20 @@ func staleCleanupLoop(ctx context.Context, mgr *manager.Manager, logger *slog.Lo
 	}
 	logger.Info("Stale cleanup active")
 
-	ticker := time.NewTicker(15 * time.Second)
-	defer ticker.Stop()
+	cleanTicker := time.NewTicker(30 * time.Second)
+	defer cleanTicker.Stop()
+	pruneTicker := time.NewTicker(5 * time.Minute)
+	defer pruneTicker.Stop()
 
 	for {
 		select {
 		case <-ctx.Done():
 			logger.Info("Stale cleanup loop stopped")
 			return
-		case <-ticker.C:
+		case <-cleanTicker.C:
 			mgr.CleanStaleHosts(ctx)
+		case <-pruneTicker.C:
+			mgr.PruneGraceFile()
 		}
 	}
 }

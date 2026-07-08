@@ -635,6 +635,7 @@ func (s *FreeRadiusService) migrateDHCPHostsDir() {
 func (s *FreeRadiusService) writeDnsmasqReloadUnits(ctx context.Context) {
 	pathUnit := `[Unit]
 Description=Watch SuniPIP DHCP hosts file for changes
+StartLimitBurst=0
 
 [Path]
 PathChanged=/etc/sunipip/dhcp-hosts.d/hosts
@@ -644,6 +645,7 @@ WantedBy=multi-user.target
 `
 	serviceUnit := `[Unit]
 Description=Reload dnsmasq after DHCP hosts change
+StartLimitBurst=0
 
 [Service]
 Type=oneshot
@@ -656,6 +658,10 @@ ExecStart=/bin/sh -c 'kill -HUP $(cat /run/dnsmasq/dnsmasq.pid 2>/dev/null || ca
 	oldSvc, _ := os.ReadFile(svcPath)
 
 	if string(oldPath) == pathUnit && string(oldSvc) == serviceUnit {
+		// Units are current; ensure they're not stuck in failed state
+		exec.CommandContext(ctx, "systemctl", "reset-failed", "sunipip-dnsmasq-reload.service").Run()
+		exec.CommandContext(ctx, "systemctl", "reset-failed", "sunipip-dnsmasq-reload.path").Run()
+		exec.CommandContext(ctx, "systemctl", "start", "sunipip-dnsmasq-reload.path").Run()
 		return
 	}
 
@@ -663,6 +669,8 @@ ExecStart=/bin/sh -c 'kill -HUP $(cat /run/dnsmasq/dnsmasq.pid 2>/dev/null || ca
 	os.WriteFile(svcPath, []byte(serviceUnit), 0644)
 
 	exec.CommandContext(ctx, "systemctl", "daemon-reload").Run()
+	exec.CommandContext(ctx, "systemctl", "reset-failed", "sunipip-dnsmasq-reload.service").Run()
+	exec.CommandContext(ctx, "systemctl", "reset-failed", "sunipip-dnsmasq-reload.path").Run()
 	exec.CommandContext(ctx, "systemctl", "enable", "--now", "sunipip-dnsmasq-reload.path").Run()
 	s.logger.Info("Installed systemd dnsmasq reload path unit")
 }
@@ -670,22 +678,29 @@ ExecStart=/bin/sh -c 'kill -HUP $(cat /run/dnsmasq/dnsmasq.pid 2>/dev/null || ca
 // CleanStaleHosts removes hosts entries for MACs no longer present in the ARP table.
 // Respects a grace period: MACs recently assigned by the hook are protected for 120s,
 // giving devices time to complete DHCP and appear in ARP.
+// The entire read→decide→write cycle is done under flock to prevent TOCTOU races
+// with the hook script that concurrently adds entries.
 func (s *FreeRadiusService) CleanStaleHosts(ctx context.Context) {
-	data, err := os.ReadFile(dhcpHostsFilePath)
-	if err != nil {
-		return
-	}
-
 	arpMACs := s.getAliveMACs()
 	if arpMACs == nil {
 		return
 	}
-
-	// Read grace-protected MACs (written by hook, protected for 120s)
-	graceMACs := s.loadGraceMACs()
-
-	// Read active leases: MAC → expiry timestamp
 	activeLeases := s.loadActiveLeases()
+
+	lockFile, err := os.OpenFile("/tmp/sunipip-dhcp-hook.lock", os.O_CREATE|os.O_WRONLY, 0666)
+	if err != nil {
+		return
+	}
+	defer lockFile.Close()
+	os.Chmod("/tmp/sunipip-dhcp-hook.lock", 0666)
+	syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX)
+	defer syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
+
+	graceMACs := s.loadGraceMACs()
+	data, err := os.ReadFile(dhcpHostsFilePath)
+	if err != nil {
+		return
+	}
 
 	var kept []string
 	var cleaned []string
@@ -696,20 +711,18 @@ func (s *FreeRadiusService) CleanStaleHosts(ctx context.Context) {
 			kept = append(kept, line)
 			continue
 		}
-		mac := strings.SplitN(line, ",", 2)[0]
+		mac := strings.ToLower(strings.SplitN(line, ",", 2)[0])
 		if _, alive := arpMACs[mac]; alive {
 			kept = append(kept, line)
 		} else if _, grace := graceMACs[mac]; grace {
 			kept = append(kept, line)
 		} else if _, leased := activeLeases[mac]; leased {
-			// Not in ARP but lease still active → idle device, keep it
 			kept = append(kept, line)
 		} else {
 			cleaned = append(cleaned, mac)
 		}
 	}
 
-	// Also check for restart flag from hook (all IPs exhausted by lease conflicts)
 	restartFlag := "/tmp/sunipip-dnsmasq-restart-needed"
 	hasRestartFlag := false
 	if _, err := os.Stat(restartFlag); err == nil {
@@ -725,15 +738,9 @@ func (s *FreeRadiusService) CleanStaleHosts(ctx context.Context) {
 		for _, mac := range cleaned {
 			s.logger.Info("Stale host cleaned", "mac", mac)
 		}
-		content := strings.Join(kept, "\n") + "\n"
-		// Use flock to prevent race with the hook script
-		lockFile, err := os.OpenFile("/tmp/sunipip-dhcp-hook.lock", os.O_CREATE|os.O_WRONLY, 0666)
-		if err == nil {
-			os.Chmod("/tmp/sunipip-dhcp-hook.lock", 0666)
-			syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX)
-			writeFileAtomic(dhcpHostsFilePath, []byte(content), 0777)
-			syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
-			lockFile.Close()
+		newContent := strings.Join(kept, "\n") + "\n"
+		if newContent != string(data) {
+			writeFileAtomic(dhcpHostsFilePath, []byte(newContent), 0777)
 		}
 		s.logger.Info("Cleaned stale hosts", "removed", len(cleaned), "remaining", len(kept)-1)
 	}
@@ -752,9 +759,8 @@ func (s *FreeRadiusService) CleanStaleHosts(ctx context.Context) {
 	}
 }
 
-// graceProtectCurrentHosts writes all MACs currently in the hosts file to the grace file.
-// Called before lease truncation + dnsmasq restart to prevent cleanup from removing
-// valid idle devices that temporarily lose both ARP and lease protection.
+// graceProtectCurrentHosts appends all MACs currently in the hosts file to the grace file.
+// Caller MUST hold /tmp/sunipip-dhcp-hook.lock before calling.
 func (s *FreeRadiusService) graceProtectCurrentHosts() {
 	const gracePath = "/tmp/sunipip-grace-macs"
 	data, err := os.ReadFile(dhcpHostsFilePath)
@@ -762,35 +768,40 @@ func (s *FreeRadiusService) graceProtectCurrentHosts() {
 		return
 	}
 	now := fmt.Sprintf("%d", time.Now().Unix())
-	var lines []string
+	var newEntries []string
 	for _, line := range strings.Split(string(data), "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
 		mac := strings.SplitN(line, ",", 2)[0]
-		lines = append(lines, mac+" "+now)
+		newEntries = append(newEntries, mac+" "+now)
 	}
-	if len(lines) > 0 {
-		existing, _ := os.ReadFile(gracePath)
-		content := string(existing) + strings.Join(lines, "\n") + "\n"
-		os.WriteFile(gracePath, []byte(content), 0666)
-		os.Chmod(gracePath, 0666)
+	if len(newEntries) == 0 {
+		return
 	}
+	f, err := os.OpenFile(gracePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0666)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	os.Chmod(gracePath, 0666)
+	f.WriteString(strings.Join(newEntries, "\n") + "\n")
 }
 
-// loadGraceMACs reads /tmp/sunipip-grace-macs, returns MACs added within 120s,
-// and rewrites the file to remove expired entries.
+// loadGraceMACs reads /tmp/sunipip-grace-macs, returns MACs added within graceDuration.
+// The file is append-only (written by the hook script concurrently). We only READ here
+// to avoid a TOCTOU race where rewriting the file would discard entries the hook just appended.
+// Periodic pruning happens in pruneGraceFile(), called less frequently.
 func (s *FreeRadiusService) loadGraceMACs() map[string]struct{} {
 	const gracePath = "/tmp/sunipip-grace-macs"
-	const graceDuration = 120
+	const graceDuration int64 = 120
 	data, err := os.ReadFile(gracePath)
 	if err != nil {
 		return nil
 	}
 	now := time.Now().Unix()
 	result := make(map[string]struct{})
-	var keptLines []string
 	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
 		parts := strings.Fields(line)
 		if len(parts) != 2 {
@@ -801,18 +812,48 @@ func (s *FreeRadiusService) loadGraceMACs() map[string]struct{} {
 			continue
 		}
 		if now-ts < graceDuration {
-			result[parts[0]] = struct{}{}
-			keptLines = append(keptLines, line)
+			result[strings.ToLower(parts[0])] = struct{}{}
 		}
 	}
-	// Rewrite to purge expired entries
-	if len(keptLines) > 0 {
-		os.WriteFile(gracePath, []byte(strings.Join(keptLines, "\n")+"\n"), 0777)
-		os.Chmod(gracePath, 0777)
-	} else {
-		os.Remove(gracePath)
-	}
 	return result
+}
+
+// pruneGraceFile rewrites the grace file under flock to remove expired entries.
+// Safe to call periodically (every few minutes); uses the same lock as the hook script.
+func (s *FreeRadiusService) PruneGraceFile() {
+	const gracePath = "/tmp/sunipip-grace-macs"
+	const graceDuration int64 = 120
+
+	lockFile, err := os.OpenFile("/tmp/sunipip-dhcp-hook.lock", os.O_CREATE|os.O_WRONLY, 0666)
+	if err != nil {
+		return
+	}
+	defer lockFile.Close()
+	os.Chmod("/tmp/sunipip-dhcp-hook.lock", 0666)
+	syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX)
+	defer syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
+
+	data, err := os.ReadFile(gracePath)
+	if err != nil {
+		return
+	}
+	now := time.Now().Unix()
+	var kept []string
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		parts := strings.Fields(line)
+		if len(parts) == 2 {
+			ts, err := strconv.ParseInt(parts[1], 10, 64)
+			if err == nil && now-ts < graceDuration {
+				kept = append(kept, line)
+			}
+		}
+	}
+	if len(kept) > 0 {
+		os.WriteFile(gracePath, []byte(strings.Join(kept, "\n")+"\n"), 0666)
+	} else {
+		os.WriteFile(gracePath, []byte(""), 0666)
+	}
+	os.Chmod(gracePath, 0666)
 }
 
 // loadActiveLeases reads dnsmasq lease files and returns MACs with non-expired leases.
@@ -855,7 +896,10 @@ func (s *FreeRadiusService) getAliveMACs() map[string]struct{} {
 			continue
 		}
 		state := fields[len(fields)-1]
-		if state == "REACHABLE" || state == "DELAY" {
+		// REACHABLE/DELAY/STALE/PROBE are all "alive" — device is or was recently connected.
+		// Only FAILED (confirmed unreachable) and INCOMPLETE (no reply to first probe) are dead.
+		// The hook's REPLACE stage uses stricter REACHABLE-only check for IP reclamation.
+		if state == "REACHABLE" || state == "DELAY" || state == "STALE" || state == "PROBE" {
 			mac := strings.ToLower(fields[4])
 			macs[mac] = struct{}{}
 		}

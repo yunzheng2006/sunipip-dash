@@ -218,6 +218,10 @@ func (m *Manager) CleanStaleHosts(ctx context.Context) {
 	m.freeradius.CleanStaleHosts(ctx)
 }
 
+func (m *Manager) PruneGraceFile() {
+	m.freeradius.PruneGraceFile()
+}
+
 // NetworkService returns the network service for direct queries.
 func (m *Manager) NetworkService() *services.NetworkService {
 	return m.network

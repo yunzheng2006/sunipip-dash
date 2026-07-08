@@ -396,6 +396,15 @@ router.beforeEach(async (to, from, next) => {
           ? requiredPerm.some(p => userPerms.includes(p))
           : userPerms.includes(requiredPerm)
         if (!hasPerm) {
+          if (to.path === '/dashboard') {
+            const firstAllowed = router.getRoutes().find(r =>
+              r.meta?.permission && r.path !== '/dashboard' &&
+              (Array.isArray(r.meta.permission)
+                ? r.meta.permission.some(p => userPerms.includes(p))
+                : userPerms.includes(r.meta.permission))
+            )
+            return next(firstAllowed?.path || '/login')
+          }
           return next('/dashboard')
         }
       }

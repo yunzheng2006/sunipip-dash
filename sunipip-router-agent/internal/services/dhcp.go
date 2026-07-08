@@ -272,13 +272,9 @@ func (s *DHCPService) cleanManagedConfigs() error {
 	return nil
 }
 
-// reload restarts the dnsmasq service, clearing stale leases first.
+// reload restarts the dnsmasq service. Leases are preserved so that connected
+// WiFi devices retain their DHCP protection across restarts.
 func (s *DHCPService) reload(ctx context.Context) error {
-	for _, lf := range []string{"/var/lib/misc/dnsmasq.leases", "/var/lib/dnsmasq/dnsmasq.leases"} {
-		if err := os.Truncate(lf, 0); err == nil {
-			s.logger.Info("Cleared dnsmasq lease file", "path", lf)
-		}
-	}
 	cmd := exec.CommandContext(ctx, "systemctl", "restart", "dnsmasq")
 	if output, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("systemctl restart dnsmasq: %w (output: %s)", err, string(output))
