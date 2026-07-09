@@ -138,19 +138,22 @@ class IpipvController extends Controller
         } catch (\Exception $e) {
             if (isset($purchaseTxn)) {
                 $deductAmount = abs((float) $purchaseTxn->amount);
-                $customer = \App\Models\Customer::find($purchaseTxn->customer_id);
-                if ($customer) {
-                    $customer->increment('balance', $deductAmount);
-                    \App\Models\Transaction::create([
-                        'customer_id'    => $customer->id,
-                        'type'           => \App\Models\Transaction::TYPE_REFUND,
-                        'amount'         => $deductAmount,
-                        'balance_before' => (float) $customer->balance - $deductAmount,
-                        'balance_after'  => (float) $customer->balance,
-                        'description'    => "开通失败自动退款 ¥{$deductAmount}",
-                        'operated_by'    => auth()->id(),
-                    ]);
-                }
+                \Illuminate\Support\Facades\DB::transaction(function () use ($purchaseTxn, $deductAmount) {
+                    $customer = \App\Models\Customer::lockForUpdate()->find($purchaseTxn->customer_id);
+                    if ($customer) {
+                        $before = (float) $customer->balance;
+                        $customer->increment('balance', $deductAmount);
+                        \App\Models\Transaction::create([
+                            'customer_id'    => $customer->id,
+                            'type'           => \App\Models\Transaction::TYPE_REFUND,
+                            'amount'         => $deductAmount,
+                            'balance_before' => $before,
+                            'balance_after'  => round($before + $deductAmount, 2),
+                            'description'    => "开通失败自动退款 ¥{$deductAmount}",
+                            'operated_by'    => auth()->id(),
+                        ]);
+                    }
+                });
             }
             Log::error('IPIPV provision failed', ['error' => $e->getMessage(), 'params' => $params]);
             return response()->json(['success' => false, 'message' => '开通失败: ' . $e->getMessage()], 500);

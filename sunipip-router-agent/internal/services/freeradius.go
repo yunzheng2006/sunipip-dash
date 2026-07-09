@@ -53,6 +53,7 @@ func (s *FreeRadiusService) Apply(ctx context.Context, cfg api.FreeRadiusConfig,
 	}
 
 	os.MkdirAll(dhcpHostsDirPath, 0755)
+	os.MkdirAll("/var/log/sunipip", 0755)
 	s.migrateDHCPHostsDir()
 
 	hookChanged, err := s.writeDHCPHook(cfg)
@@ -351,7 +352,9 @@ func (s *FreeRadiusService) writeDHCPHook(cfg api.FreeRadiusConfig) (bool, error
 	}
 
 	// 5. Ensure shared files are writable by freerad (hook runs as freerad user)
-	for _, f := range []string{"/tmp/sunipip-dhcp-hook.lock", "/tmp/sunipip-grace-macs"} {
+	// These MUST be outside /tmp because FreeRADIUS uses PrivateTmp=true,
+	// which gives the hook a private /tmp that the agent cannot see.
+	for _, f := range []string{"/var/log/sunipip/dhcp-hook.lock", "/var/log/sunipip/grace-macs"} {
 		fh, err := os.OpenFile(f, os.O_CREATE|os.O_WRONLY, 0666)
 		if err == nil {
 			fh.Close()
@@ -360,7 +363,10 @@ func (s *FreeRadiusService) writeDHCPHook(cfg api.FreeRadiusConfig) (bool, error
 	}
 	os.Chmod(dhcpHostsFilePath, 0777)
 
-	// 6. Clean dhcp-hosts.conf: remove entries whose IPs are not in any user's pool
+	// 6. Grant CAP_NET_ADMIN to ip binary so freerad can run `ip neigh replace`
+	s.grantIPNeighCapability()
+
+	// 7. Clean dhcp-hosts.conf: remove entries whose IPs are not in any user's pool
 	allValidIPs := make(map[string]bool)
 	for _, u := range cfg.Users {
 		for _, ip := range u.AllocatedIPs {
@@ -491,7 +497,7 @@ LOGFILE="/var/log/sunipip/radius-dhcp-hook.log"
 DHCP_HOSTS="/etc/sunipip/dhcp-hosts.d/hosts"
 POOL="/etc/sunipip/user-ip-pool.conf"
 LEASES="/var/lib/misc/dnsmasq.leases"
-LOCKFILE="/tmp/sunipip-dhcp-hook.lock"
+LOCKFILE="/var/log/sunipip/dhcp-hook.lock"
 
 MAC=$(echo "$CALLING_STATION_ID" | tr -d '"')
 USER=$(echo "$USER_NAME" | tr -d '"')
@@ -503,9 +509,14 @@ log() { echo "$(date '+%Y-%m-%d %H:%M:%S') $1" >> "$LOGFILE"; }
 MAC=$(echo "$MAC" | tr 'A-Z-' 'a-z:' | sed 's/[^a-f0-9:]//g')
 [ -z "$MAC" ] && exit 0
 
-# Fast path: if this MAC already has an entry, skip everything
-if grep -q "^${MAC}," "$DHCP_HOSTS" 2>/dev/null; then
-    exit 0
+# Fast path: if this MAC already has an entry with an IP in this user's pool, skip
+EXISTING_IP=$(grep "^${MAC}," "$DHCP_HOSTS" 2>/dev/null | head -1 | cut -d',' -f2)
+if [ -n "$EXISTING_IP" ]; then
+    USER_IPS=$(awk -v u="$USER" '$1 == u {print $2; exit}' "$POOL" 2>/dev/null)
+    if echo ",$USER_IPS," | grep -q ",${EXISTING_IP},"; then
+        exit 0
+    fi
+    # MAC has IP from a different user's pool — remove stale entry and reassign
 fi
 
 log "AUTH: user=$USER mac=$MAC (new)"
@@ -526,6 +537,13 @@ IFS=',' read -ra IP_ARRAY <<< "$IPS"
 TMP="/tmp/sunipip-dhcp-hosts.tmp.$$"
 cp "$DHCP_HOSTS" "$TMP" 2>/dev/null || echo "# Managed by RADIUS post-auth hook" > "$TMP"
 
+# Remove any existing entry for this MAC (user may have switched accounts)
+if grep -q "^${MAC}," "$TMP" 2>/dev/null; then
+    grep -v "^${MAC}," "$TMP" > "${TMP}.clean"
+    mv "${TMP}.clean" "$TMP"
+    log "REMOVED: old entry for mac=$MAC (user switched)"
+fi
+
 # Assign first IP that is free in BOTH hosts file AND lease file
 # Note: stale entry cleanup is handled by the agent's CleanStaleHosts (checks ARP + lease + grace)
 FOUND=0
@@ -545,7 +563,7 @@ for IP in "${IP_ARRAY[@]}"; do
     [ -z "$IFACE" ] && IFACE=$(ip -o addr show to "10.10.0.0/16" 2>/dev/null | awk '{print $2}' | head -1)
     [ -n "$IFACE" ] && ip neigh replace "$IP" lladdr "$MAC" dev "$IFACE" nud reachable 2>/dev/null
     # Protect this MAC from cleanup for 120s (device needs time to complete DHCP)
-    echo "${MAC} $(date +%s)" >> /tmp/sunipip-grace-macs
+    echo "${MAC} $(date +%s)" >> /var/log/sunipip/grace-macs
     log "ASSIGNED: user=$USER mac=$MAC ip=$IP"
     FOUND=1
     break
@@ -566,8 +584,8 @@ if [ "$FOUND" = "0" ]; then
                 cat "${TMP}.new" > "$DHCP_HOSTS"
                 rm -f "$TMP" "${TMP}.new"
                 ip neigh replace "$IP" lladdr "$MAC" dev "$IFACE" nud reachable 2>/dev/null
-                echo "${MAC} $(date +%s)" >> /tmp/sunipip-grace-macs
-                touch /tmp/sunipip-dnsmasq-restart-needed
+                echo "${MAC} $(date +%s)" >> /var/log/sunipip/grace-macs
+                touch /var/log/sunipip/dnsmasq-restart-needed
                 log "REPLACED: dead=$OLD_MAC new=$MAC ip=$IP"
                 FOUND=1
                 break
@@ -578,13 +596,13 @@ fi
 
 if [ "$FOUND" = "0" ]; then
     # All IPs blocked by leases from dead MACs — request restart to clear
-    touch /tmp/sunipip-dnsmasq-restart-needed
+    touch /var/log/sunipip/dnsmasq-restart-needed
     for IP in "${IP_ARRAY[@]}"; do
         if ! grep -q ",${IP}," "$TMP" 2>/dev/null; then
             echo "${MAC},${IP},30m" >> "$TMP"
             cat "$TMP" > "$DHCP_HOSTS"
             rm -f "$TMP"
-            echo "${MAC} $(date +%s)" >> /tmp/sunipip-grace-macs
+            echo "${MAC} $(date +%s)" >> /var/log/sunipip/grace-macs
             log "ASSIGNED (restart pending): user=$USER mac=$MAC ip=$IP"
             FOUND=1
             break
@@ -606,6 +624,24 @@ exit 0
 	}
 	s.logger.Info("Wrote RADIUS DHCP hook script")
 	return true, nil
+}
+
+// grantIPNeighCapability gives the `ip` binary CAP_NET_ADMIN so the hook
+// (running as freerad) can execute `ip neigh replace` to set ARP entries.
+func (s *FreeRadiusService) grantIPNeighCapability() {
+	ipPath, err := exec.LookPath("ip")
+	if err != nil {
+		return
+	}
+	out, err := exec.Command("getcap", ipPath).Output()
+	if err == nil && strings.Contains(string(out), "cap_net_admin") {
+		return
+	}
+	if err := exec.Command("setcap", "cap_net_admin+ep", ipPath).Run(); err != nil {
+		s.logger.Warn("Failed to setcap on ip binary, hook ip neigh will fail", "path", ipPath, "error", err)
+	} else {
+		s.logger.Info("Granted CAP_NET_ADMIN to ip binary", "path", ipPath)
+	}
 }
 
 // migrateDHCPHostsDir moves dhcp-hosts.conf from the old flat file into dhcp-hosts.d/.
@@ -681,25 +717,35 @@ ExecStart=/bin/sh -c 'kill -HUP $(cat /run/dnsmasq/dnsmasq.pid 2>/dev/null || ca
 // The entire read→decide→write cycle is done under flock to prevent TOCTOU races
 // with the hook script that concurrently adds entries.
 func (s *FreeRadiusService) CleanStaleHosts(ctx context.Context) {
+	lockFile, err := os.OpenFile("/var/log/sunipip/dhcp-hook.lock", os.O_CREATE|os.O_WRONLY, 0666)
+	if err != nil {
+		return
+	}
+	defer lockFile.Close()
+	os.Chmod("/var/log/sunipip/dhcp-hook.lock", 0666)
+	syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX)
+	defer syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
+
+	// All reads inside the flock to prevent TOCTOU race with the hook script:
+	// hook writes hosts+grace atomically under the same lock.
 	arpMACs := s.getAliveMACs()
 	if arpMACs == nil {
 		return
 	}
 	activeLeases := s.loadActiveLeases()
-
-	lockFile, err := os.OpenFile("/tmp/sunipip-dhcp-hook.lock", os.O_CREATE|os.O_WRONLY, 0666)
-	if err != nil {
-		return
-	}
-	defer lockFile.Close()
-	os.Chmod("/tmp/sunipip-dhcp-hook.lock", 0666)
-	syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX)
-	defer syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
-
 	graceMACs := s.loadGraceMACs()
 	data, err := os.ReadFile(dhcpHostsFilePath)
 	if err != nil {
 		return
+	}
+
+	// Resolve network interface for ARP fixup of grace-protected MACs
+	iface := ""
+	if out, err := exec.Command("ip", "-o", "addr", "show", "to", "10.10.0.0/16").Output(); err == nil {
+		fields := strings.Fields(string(out))
+		if len(fields) >= 2 {
+			iface = fields[1]
+		}
 	}
 
 	var kept []string
@@ -716,6 +762,15 @@ func (s *FreeRadiusService) CleanStaleHosts(ctx context.Context) {
 			kept = append(kept, line)
 		} else if _, grace := graceMACs[mac]; grace {
 			kept = append(kept, line)
+			// Proactively fix ARP for grace-protected MACs so they survive
+			// after grace expires. The hook's ip neigh replace may have failed
+			// due to missing CAP_NET_ADMIN; we run as root so we can fix it.
+			if iface != "" {
+				parts := strings.Split(line, ",")
+				if len(parts) >= 2 {
+					exec.Command("ip", "neigh", "replace", parts[1], "lladdr", mac, "dev", iface, "nud", "reachable").Run()
+				}
+			}
 		} else if _, leased := activeLeases[mac]; leased {
 			kept = append(kept, line)
 		} else {
@@ -723,7 +778,7 @@ func (s *FreeRadiusService) CleanStaleHosts(ctx context.Context) {
 		}
 	}
 
-	restartFlag := "/tmp/sunipip-dnsmasq-restart-needed"
+	restartFlag := "/var/log/sunipip/dnsmasq-restart-needed"
 	hasRestartFlag := false
 	if _, err := os.Stat(restartFlag); err == nil {
 		hasRestartFlag = true
@@ -760,9 +815,9 @@ func (s *FreeRadiusService) CleanStaleHosts(ctx context.Context) {
 }
 
 // graceProtectCurrentHosts appends all MACs currently in the hosts file to the grace file.
-// Caller MUST hold /tmp/sunipip-dhcp-hook.lock before calling.
+// Caller MUST hold /var/log/sunipip/dhcp-hook.lock before calling.
 func (s *FreeRadiusService) graceProtectCurrentHosts() {
-	const gracePath = "/tmp/sunipip-grace-macs"
+	const gracePath = "/var/log/sunipip/grace-macs"
 	data, err := os.ReadFile(dhcpHostsFilePath)
 	if err != nil {
 		return
@@ -789,12 +844,12 @@ func (s *FreeRadiusService) graceProtectCurrentHosts() {
 	f.WriteString(strings.Join(newEntries, "\n") + "\n")
 }
 
-// loadGraceMACs reads /tmp/sunipip-grace-macs, returns MACs added within graceDuration.
+// loadGraceMACs reads /var/log/sunipip/grace-macs, returns MACs added within graceDuration.
 // The file is append-only (written by the hook script concurrently). We only READ here
 // to avoid a TOCTOU race where rewriting the file would discard entries the hook just appended.
 // Periodic pruning happens in pruneGraceFile(), called less frequently.
 func (s *FreeRadiusService) loadGraceMACs() map[string]struct{} {
-	const gracePath = "/tmp/sunipip-grace-macs"
+	const gracePath = "/var/log/sunipip/grace-macs"
 	const graceDuration int64 = 120
 	data, err := os.ReadFile(gracePath)
 	if err != nil {
@@ -821,15 +876,15 @@ func (s *FreeRadiusService) loadGraceMACs() map[string]struct{} {
 // pruneGraceFile rewrites the grace file under flock to remove expired entries.
 // Safe to call periodically (every few minutes); uses the same lock as the hook script.
 func (s *FreeRadiusService) PruneGraceFile() {
-	const gracePath = "/tmp/sunipip-grace-macs"
+	const gracePath = "/var/log/sunipip/grace-macs"
 	const graceDuration int64 = 120
 
-	lockFile, err := os.OpenFile("/tmp/sunipip-dhcp-hook.lock", os.O_CREATE|os.O_WRONLY, 0666)
+	lockFile, err := os.OpenFile("/var/log/sunipip/dhcp-hook.lock", os.O_CREATE|os.O_WRONLY, 0666)
 	if err != nil {
 		return
 	}
 	defer lockFile.Close()
-	os.Chmod("/tmp/sunipip-dhcp-hook.lock", 0666)
+	os.Chmod("/var/log/sunipip/dhcp-hook.lock", 0666)
 	syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX)
 	defer syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
 

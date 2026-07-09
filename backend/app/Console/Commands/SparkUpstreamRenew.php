@@ -62,10 +62,10 @@ class SparkUpstreamRenew extends Command
                 continue;
             }
 
-            // 关键：只有客户订阅到期日超过上游实例到期日 3 天以上才续费
-            // 3 天容差：上游和本地到期时间可能有几小时差异，差距在 3 天内视为同一周期，不续费
-            if ($instance->expire_at && $subscription->expires_at <= $instance->expire_at->copy()->addDays(3)) {
-                $this->line("  跳过 {$instance->instance_id}: 订阅({$subscription->expires_at->format('m-d')})与实例到期({$instance->expire_at->format('m-d')})差距在3天内，不续上游");
+            // 只要实例到期覆盖不到订阅到期就续费（容差 6 小时，仅吸收本地/上游几小时的时钟差）
+            // 之前容差写成 3 天：订阅比实例晚到期 1-3 天时被跳过，客户已付费的最后几天上游掉线
+            if ($instance->expire_at && $subscription->expires_at <= $instance->expire_at->copy()->addHours(6)) {
+                $this->line("  跳过 {$instance->instance_id}: 实例到期({$instance->expire_at->format('m-d H:i')})已覆盖订阅到期({$subscription->expires_at->format('m-d H:i')})");
                 $skipped++;
                 continue;
             }

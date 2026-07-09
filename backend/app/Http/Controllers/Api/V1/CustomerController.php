@@ -519,6 +519,9 @@ class CustomerController extends Controller
         if ($referrer->id === $customer->id) {
             return $this->error('不能绑定自己的邀请码', 422);
         }
+        if (app(\App\Services\ReferralService::class)->wouldCreateReferralCycle($customer->id, $referrer->id)) {
+            return $this->error('不能绑定：该推荐关系会形成循环（对方的推荐链上已包含此客户）', 422);
+        }
         if ($customer->referred_by_customer) {
             $existing = Customer::find($customer->referred_by_customer);
             return $this->error(sprintf(
@@ -623,6 +626,11 @@ class CustomerController extends Controller
             return $this->error('新推荐人不存在', 422);
         }
 
+        // 校验：不能形成循环推荐（互刷佣金）
+        if (app(\App\Services\ReferralService::class)->wouldCreateReferralCycle($customer->id, $newReferrerId)) {
+            return $this->error('不能划转：该推荐关系会形成循环（新推荐人的推荐链上已包含此客户）', 422);
+        }
+
         $oldReferrerId = $customer->referred_by_customer;
         $oldReferrer = Customer::find($oldReferrerId);
 
@@ -683,7 +691,8 @@ class CustomerController extends Controller
                     $oldReferrer->decrement('commission_balance', $creditedAmount);
                     \App\Models\Transaction::create([
                         'customer_id' => $oldReferrer->id,
-                        'type' => \App\Models\Transaction::TYPE_COMMISSION,
+                        // 用 REVERSAL 类型：负数 COMMISSION 不在消费排除清单里，会被统计成"消费"虚增 VIP 基数
+                        'type' => \App\Models\Transaction::TYPE_COMMISSION_REVERSAL,
                         'amount' => -$creditedAmount,
                         'balance_before' => $oldBefore,
                         'balance_after' => $oldBefore - $creditedAmount,

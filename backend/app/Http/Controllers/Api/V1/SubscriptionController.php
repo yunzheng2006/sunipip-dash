@@ -903,6 +903,29 @@ class SubscriptionController extends Controller
      * 退订 - 客户1天内可退订，释放IP+退款
      * POST /subscriptions/{id}/refund
      */
+    /**
+     * 该订阅的实付净额 = 支出交易合计 − 已退款合计；无任何支出交易时返回 null
+     * （批量下单的非首条订阅查不到购买交易，调用方需自行回退）
+     */
+    private function subscriptionNetPaid(Subscription $subscription): ?float
+    {
+        $spent = (float) Transaction::where('related_type', Subscription::class)
+            ->where('related_id', $subscription->id)
+            ->whereIn('type', [Transaction::TYPE_PURCHASE, Transaction::TYPE_RENEW, Transaction::TYPE_DEDUCTION])
+            ->where('amount', '<', 0)
+            ->sum('amount');
+        if ($spent === 0.0) {
+            return null;
+        }
+        $refunded = (float) Transaction::where('related_type', Subscription::class)
+            ->where('related_id', $subscription->id)
+            ->where('type', Transaction::TYPE_REFUND)
+            ->where('amount', '>', 0)
+            ->sum('amount');
+
+        return round(abs($spent) - $refunded, 2);
+    }
+
     public function refund(Request $request, Subscription $subscription): JsonResponse
     {
         $data = $request->validate([
@@ -916,7 +939,21 @@ class SubscriptionController extends Controller
             return $this->error('只能退订状态为激活或已过期的订阅', 422);
         }
 
-        $refundAmount = $data['refund_amount'] ?? $subscription->price;
+        // 默认退款额 = 该订阅实付净额（支出交易 − 已退款），price 可能虚高或未实际收款
+        // 批量下单的非首条订阅查不到购买交易（related_id 只挂第一条），此时回退 price 但不超过实付
+        if (isset($data['refund_amount'])) {
+            $refundAmount = (float) $data['refund_amount'];
+        } else {
+            $netPaid = $this->subscriptionNetPaid($subscription);
+            if ($netPaid !== null) {
+                $refundAmount = min((float) $subscription->price, $netPaid);
+            } elseif (!$subscription->balance_deducted) {
+                // 无任何支出交易且未标记扣款（线下单/免费划转接收方）：默认不退，需显式指定金额
+                $refundAmount = 0.0;
+            } else {
+                $refundAmount = (float) $subscription->price;
+            }
+        }
         $proxyIp = $subscription->proxyIp;
         $userId = $request->user()->id;
         $releaseUpstream = $data['release_upstream'] ?? true;
@@ -974,7 +1011,14 @@ class SubscriptionController extends Controller
         }
 
         // ── 第3步：API 释放成功，执行退订+退款事务 ──
-        DB::transaction(function () use ($subscription, $data, $refundAmount, $userId, $proxyIp, $sparkResult, $releaseUpstream, $reverseCommission) {
+        try {
+            DB::transaction(function () use ($subscription, $data, $refundAmount, $userId, $proxyIp, $sparkResult, $releaseUpstream, $reverseCommission) {
+            // 幂等：事务内加锁复查状态，防止双击/并发退订导致双倍退款
+            $locked = Subscription::lockForUpdate()->find($subscription->id);
+            if (!$locked || !in_array($locked->status, ['active', 'expired'])) {
+                throw new \RuntimeException('订阅状态已变更（可能已被退订），本次退订中止');
+            }
+
             $subscription->update([
                 'status' => 'refunded',
                 'keep_performance' => !$reverseCommission,
@@ -1045,7 +1089,10 @@ class SubscriptionController extends Controller
                     ]);
                 }
             }
-        });
+            });
+        } catch (\RuntimeException $e) {
+            return $this->error($e->getMessage(), 422);
+        }
 
         \App\Services\Feishu\FeishuSyncTrigger::triggerForCustomer($subscription->customer_id);
 
@@ -1123,7 +1170,15 @@ class SubscriptionController extends Controller
         $userId = $request->user()->id;
         $reason = $data['reason'] ?? "部分退款：退还{$refundableMonths}个月";
 
+        try {
         DB::transaction(function () use ($subscription, $refundAmount, $refundableMonths, $newExpiresAt, $reason, $userId, $currentMonth, $totalMonths, $monthlyPrice) {
+            // 幂等：加锁复查，防止双击/并发导致重复退款（第二次进来 expires_at 已被缩短）
+            $locked = Subscription::lockForUpdate()->find($subscription->id);
+            if (!$locked || $locked->status !== 'active'
+                || !Carbon::parse($locked->expires_at)->equalTo(Carbon::parse($subscription->expires_at))) {
+                throw new \RuntimeException('订阅状态已变更（可能已被退款），本次部分退款中止');
+            }
+
             $customer = Customer::lockForUpdate()->find($subscription->customer_id);
 
             // 1. 退款到客户余额
@@ -1142,9 +1197,13 @@ class SubscriptionController extends Controller
                 'operated_by' => $userId,
             ]);
 
-            // 2. 缩短订阅到当月月底
+            // 2. 缩短订阅到当月月底，price/duration 同步扣减已退部分
+            //    （否则日后全额退订/续费按原 price 计算会把已退的月份再退/再收一次）
             $subscription->update([
                 'expires_at' => $newExpiresAt,
+                'price' => max(round((float) $subscription->price - $refundAmount, 2), 0),
+                'duration' => $currentMonth,
+                'unit' => 3,
                 'refund_amount' => $refundAmount,
                 'refund_reason' => $reason,
                 'refunded_at' => now(),
@@ -1159,6 +1218,9 @@ class SubscriptionController extends Controller
             // 4. 创建负数佣金记录（退款当天扣除业绩，不修改原记录）
             $this->createNegativeCommissions($subscription, $refundAmount, $refundableMonths, $totalMonths, $reason, $userId);
         });
+        } catch (\RuntimeException $e) {
+            return $this->error($e->getMessage(), 422);
+        }
 
         \App\Services\Feishu\FeishuSyncTrigger::triggerForCustomer($subscription->customer_id);
 
@@ -1257,6 +1319,15 @@ class SubscriptionController extends Controller
         }
         if (!in_array($subscription->status, ['active', 'expired'])) {
             return $this->error('只能转正状态为活跃或已过期的测试订阅', 422);
+        }
+
+        // 过期测试单可能已被回收（IP 软删/上游已释放）：转正只改本地状态不会恢复上游，
+        // 扣了钱客户拿到的是死 IP。此类订单必须重新开通而不是转正
+        $convertIp = $subscription->proxyIp()->withTrashed()->first();
+        if ($subscription->status === 'expired') {
+            if (!$convertIp || $convertIp->trashed() || in_array($convertIp->status, ['released', 'expired'], true)) {
+                return $this->error('该测试订阅的 IP 已被回收/释放，无法转正，请重新开通', 422);
+            }
         }
 
         $data = $request->validate([
@@ -1416,14 +1487,20 @@ class SubscriptionController extends Controller
         $userId = $request->user()->id;
 
         // ── 第1步：清理转发规则（事务外，调用远端 API）──
+        // 上游删除失败必须中止：否则客户拿到退款但 NY 转发还在服务，
+        // 且规则被标 deleted 后永久脱离重试/对账视野
         $forwardDeleted = 0;
         try {
             $forwardDeleted = app(\App\Services\Ny\NyForwardService::class)
                 ->deleteForSubscription($subscription);
         } catch (\Throwable $e) {
-            \Log::warning('downgrade: delete ny forward failed', [
+            \Log::warning('downgrade: delete ny forward failed, aborted', [
                 'subscription_id' => $subscription->id, 'error' => $e->getMessage(),
             ]);
+            return $this->error('上游转发删除失败，降级中止，请稍后重试: ' . $e->getMessage(), 422);
+        }
+        if ($forwardRule->fresh()->status === 'failed') {
+            return $this->error('上游转发删除失败，降级中止，请稍后重试', 422);
         }
         try {
             app(\App\Services\Xui\XuiForwardService::class)->deleteForSubscription($subscription);

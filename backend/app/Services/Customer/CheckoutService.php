@@ -156,7 +156,7 @@ class CheckoutService
                     'product_name' => $product['product_name'] ?? '',
                     'country_code' => $countryCode,
                     'country_cn' => $countryCn,
-                    'sale_price' => round($unitPrice * $duration, 2),
+                    'sale_price' => round($unitPrice, 2), // 单月单价，provision 侧 × durationMonths
                     'quantity' => $quantity,
                     'duration' => $duration,
                     'unit' => $unit,
@@ -332,7 +332,7 @@ class CheckoutService
                         'product_name' => $product['product_name'] ?? '',
                         'country_code' => $countryCode,
                         'country_cn' => $countryCn,
-                        'sale_price' => round($unitPrice * $duration, 2),
+                        'sale_price' => round($unitPrice, 2), // 单月单价，provision 侧 × durationMonths
                         'quantity' => $ri['quantity'],
                         'duration' => $duration,
                         'unit' => 3,
@@ -543,6 +543,7 @@ class CheckoutService
                 $allIpIds = [];
                 $allOrders = [];
                 $blockedByProduct = null;
+                $failedItems = []; // 单项失败不抛异常回滚整单——已成功项的上游订单记录必须保留，失败项金额退回
 
                 foreach ($resolvedItems as $ri) {
                     $product = $ri['product'];
@@ -552,10 +553,15 @@ class CheckoutService
                         ?: ($product['country_name'] ?? \App\Services\CountryMapper::toCn($countryCode) ?? $countryCode);
 
                     $fwdFeePerIp = $ri['forward_fee'] ?? 0;
-                    $subscriptionPrice = $isFixedPricing
-                        ? round($fwdFeePerIp * $duration, 2)
-                        : round(($ri['sale_price'] + $fwdFeePerIp) * $duration, 2);
+                    // 单月单价（含中转）。Spark provision 侧会 × durationMonths 落库总价，
+                    // 这里不能预乘 duration，否则 price 被平方放大（duration≥2 时曾多算 duration 倍）
+                    $monthlyPricePerIp = $isFixedPricing
+                        ? round($fwdFeePerIp, 2)
+                        : round($ri['sale_price'] + $fwdFeePerIp, 2);
+                    $subscriptionPrice = round($monthlyPricePerIp * $duration, 2);
+                    $itemTotal = round($subscriptionPrice * (int) $ri['quantity'], 2);
 
+                    try {
                     if ($source === 'ipipv') {
                         $ipipvAssetGroup = IpAssetGroup::where('source_type', 'ipipv_api')->where('status', 1)->first()
                             ?: IpAssetGroup::where('source_name', 'IPIPV')->where('status', 1)->first();
@@ -613,7 +619,7 @@ class CheckoutService
                             'product_name' => $product['product_name'] ?? '',
                             'country_code' => $countryCode,
                             'country_cn' => $countryCn,
-                            'sale_price' => $subscriptionPrice,
+                            'sale_price' => $monthlyPricePerIp,
                             'quantity' => $ri['quantity'],
                             'duration' => $duration,
                             'unit' => 3,
@@ -624,6 +630,10 @@ class CheckoutService
                             'created_by' => 1,
                             'forward_plan_id' => $forwardPlan?->id,
                             'purchased_module' => $forwardPlan?->module ?? 'static',
+                            // 异步回调补建订阅时依赖此字段标记 balance_deducted，缺失会导致统计当作未收款
+                            'payment_method' => 'balance',
+                            // 客户实付的单月中转费（可能是特价），downgrade 退款须按实收而非套餐原价
+                            'forward_fee' => $fwdFeePerIp,
                         ];
 
                         $blockedByProduct = $blockedByProduct ?? \App\Models\SparkProductBlock::blockedCidrsByProduct();
@@ -639,6 +649,36 @@ class CheckoutService
                         $allIpIds = array_merge($allIpIds, $provisionResult['proxy_ip_ids']);
                         $allOrders[] = $provisionResult['spark_order']->id;
                     }
+                    } catch (\Throwable $e) {
+                        \Illuminate\Support\Facades\Log::error('Checkout item provision failed', [
+                            'customer_id' => $fresh->id,
+                            'product_id' => $product['product_id'] ?? null,
+                            'error' => $e->getMessage(),
+                        ]);
+                        $failedItems[] = [
+                            'product' => $product['product_name'] ?? ($product['product_id'] ?? '未知产品'),
+                            'amount' => $itemTotal,
+                            'error' => $e->getMessage(),
+                        ];
+                    }
+                }
+
+                // 失败项金额退回余额（同事务内，成功项照常保留）
+                if (!empty($failedItems)) {
+                    $failedTotal = round(array_sum(array_column($failedItems, 'amount')), 2);
+                    if ($failedTotal > 0) {
+                        $balBefore = (float) $fresh->fresh()->balance;
+                        $fresh->increment('balance', $failedTotal);
+                        Transaction::create([
+                            'customer_id' => $fresh->id,
+                            'type' => Transaction::TYPE_REFUND,
+                            'amount' => $failedTotal,
+                            'balance_before' => $balBefore,
+                            'balance_after' => round($balBefore + $failedTotal, 2),
+                            'description' => '开通失败自动退款: ' . collect($failedItems)->pluck('product')->join(', '),
+                            'operated_by' => null,
+                        ]);
+                    }
                 }
 
                 // Set purchased_module + balance_deducted on all new subscriptions
@@ -651,14 +691,16 @@ class CheckoutService
                     ]);
                 }
 
+                $failedTotal = round(array_sum(array_column($failedItems, 'amount')), 2);
                 return [
                     'subscription_ids' => $allSubIds,
                     'proxy_ip_ids' => $allIpIds,
                     'spark_order_ids' => $allOrders,
-                    'charged' => $total,
+                    'charged' => round($total - $failedTotal, 2), // 佣金/展示按实际成交额
                     'list_total' => $listTotal,
-                    'new_balance' => (float) $balanceAfter,
+                    'new_balance' => round((float) $balanceAfter + $failedTotal, 2),
                     'forward_plan' => $forwardPlan?->name,
+                    'failed_items' => $failedItems,
                 ];
             });
         } catch (ValidationException $e) {

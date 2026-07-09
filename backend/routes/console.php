@@ -2,6 +2,21 @@
 
 use Illuminate\Support\Facades\Schedule;
 
+// 关键任务失败时发企微告警（此前所有任务失败只留日志，无人感知）
+$cronAlert = function (string $command) {
+    return function () use ($command) {
+        try {
+            app(\App\Services\NotificationService::class)->dispatch('cron_failed', [
+                'title' => '定时任务失败',
+                'content' => "### ⚠️ 定时任务失败\n\n`{$command}` 执行失败（非零退出），请检查 storage/logs/laravel.log",
+                'dedup_key' => 'cron_fail_' . str_replace([':', ' '], '_', $command) . '_' . now()->format('Y-m-d_H'),
+            ]);
+        } catch (\Throwable $e) {
+            \Illuminate\Support\Facades\Log::error("cron 失败告警发送失败: {$e->getMessage()}");
+        }
+    };
+};
+
 // 每天 09:00 检查订阅到期 / 客户余额，触发 webhook 通知
 Schedule::command('subscriptions:check-expiring')
     ->dailyAt('09:00')
@@ -29,7 +44,8 @@ Schedule::command('subscriptions:expire')
     ->hourly()
     ->timezone('Asia/Shanghai')
     ->withoutOverlapping()
-    ->runInBackground();
+    ->runInBackground()
+    ->onFailure($cronAlert('subscriptions:expire'));
 
 // 每分钟扫描 Spark 待处理订单（1分钟 cutoff），确保开通后快速同步
 Schedule::command('spark:sync-pending --minutes=1')
@@ -55,23 +71,33 @@ Schedule::command('subscriptions:auto-renew')
     ->dailyAt('00:00')
     ->timezone('Asia/Shanghai')
     ->withoutOverlapping()
-    ->runInBackground();
+    ->runInBackground()
+    ->onFailure($cronAlert('subscriptions:auto-renew'));
 
 // 每天 06:00 自动续费即将到期的上游实例（Spark+IPIPV 按月滚动，与客户计费解耦）
 Schedule::command('upstream:auto-renew')
     ->dailyAt('06:00')
     ->timezone('Asia/Shanghai')
     ->withoutOverlapping()
-    ->runInBackground();
+    ->runInBackground()
+    ->onFailure($cronAlert('upstream:auto-renew'));
 
 // 每 10 分钟自动重试失败的转发规则（超时、限流等临时性故障）
 Schedule::command('forward:retry-failed --force')
     ->everyTenMinutes()
     ->withoutOverlapping()
-    ->runInBackground();
+    ->runInBackground()
+    ->onFailure($cronAlert('forward:retry-failed --force'));
 
 // 每分钟检测软路由设备在线状态，超过5分钟无心跳标记为 offline
 Schedule::command('router:check-online')
     ->everyMinute()
+    ->withoutOverlapping()
+    ->runInBackground();
+
+// 每月 1 日 02:30 固化上月业绩统计快照（历史整月查询走快照，防止数据漂移）
+Schedule::command('stats:snapshot')
+    ->monthlyOn(1, '02:30')
+    ->timezone('Asia/Shanghai')
     ->withoutOverlapping()
     ->runInBackground();

@@ -200,6 +200,22 @@ class ReferralService
     }
 
     /**
+     * 检测绑定推荐人是否会形成循环（A→B→A 或更长的环）
+     * 互相推荐后对倒消费可互刷佣金套现，必须拦截
+     */
+    public function wouldCreateReferralCycle(int $customerId, int $referrerId): bool
+    {
+        $current = $referrerId;
+        for ($i = 0; $i < 20 && $current; $i++) {
+            if ($current === $customerId) {
+                return true;
+            }
+            $current = (int) Customer::where('id', $current)->value('referred_by_customer');
+        }
+        return false;
+    }
+
+    /**
      * Reverse all commissions (referral + sales) for a refunded subscription
      */
     public function reverseCommissions(int $customerId, ?int $subscriptionId): void
@@ -211,6 +227,10 @@ class ReferralService
             ->get();
 
         foreach ($refCommissions as $rc) {
+            // 负数记录（部分退款的冲减记录）不参与冲销，否则账面错乱
+            if ((float) $rc->commission_amount <= 0) {
+                continue;
+            }
             if ($rc->status === 'credited') {
                 $referrer = Customer::find($rc->referrer_id);
                 if ($referrer) {
@@ -229,14 +249,23 @@ class ReferralService
                             'operated_by' => null,
                         ]);
                     }
+                    // 推荐人余额不足以全额回收时留痕，避免缺口静默消失
+                    if ($deduct < (float) $rc->commission_amount) {
+                        Log::warning('Commission reversal shortfall: 推荐人余额不足，部分佣金未能回收', [
+                            'commission_id' => $rc->id,
+                            'referrer_id' => $rc->referrer_id,
+                            'commission_amount' => (float) $rc->commission_amount,
+                            'recovered' => $deduct,
+                            'shortfall' => round((float) $rc->commission_amount - $deduct, 2),
+                        ]);
+                    }
                 }
             }
             $rc->update(['status' => 'reversed']);
         }
 
-        // 2. Reverse sales commissions
+        // 2. Reverse sales commissions（不限 trigger_type：续费/划转/中转产生的销售提成退款时同样回收）
         $salesCommissions = SalesCommission::where('customer_id', $customerId)
-            ->where('trigger_type', 'purchase')
             ->when($subscriptionId, fn($q) => $q->where('trigger_id', $subscriptionId))
             ->whereIn('status', ['pending', 'credited'])
             ->get();

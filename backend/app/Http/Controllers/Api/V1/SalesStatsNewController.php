@@ -23,6 +23,27 @@ class SalesStatsNewController extends Controller
         END, 1)";
     }
 
+    /** 从快照行重算汇总（与实时计算的 summary 字段一致） */
+    private function summaryFromRows($rows): array
+    {
+        return [
+            'total_customers' => $rows->count(),
+            'total_spending' => round($rows->sum('spending'), 2),
+            'total_net_performance' => round($rows->sum('net_performance'), 2),
+            'total_commission' => round($rows->sum('commission'), 2),
+            'total_sales_cost' => round($rows->sum('sales_cost'), 2),
+            'total_ip_hard_cost' => round($rows->sum('ip_hard_cost'), 2),
+            'total_fwd_hard_cost' => round($rows->sum('fwd_hard_cost'), 2),
+            'total_hard_cost' => round($rows->sum('hard_cost'), 2),
+            'total_profit' => round($rows->sum('profit'), 2),
+            'total_balance' => round($rows->sum('balance'), 2),
+            'total_ip_only' => $rows->sum('ip_only_count'),
+            'total_forward_ip' => $rows->sum('forward_ip_count'),
+            'total_test_ip' => $rows->sum('test_ip_count'),
+            'total_unpaid_ip' => $rows->sum('unpaid_ip_count'),
+        ];
+    }
+
     public function index(Request $request): JsonResponse
     {
         $user = $request->user();
@@ -55,6 +76,36 @@ class SalesStatsNewController extends Controller
         } else {
             $periodStart = $now->copy()->startOfDay();
             $periodEnd = $now->copy()->endOfDay();
+        }
+
+        // 历史整月查询优先走固化快照（stats:snapshot 每月固化），避免退款/续费/改价导致历史报表漂移
+        // 传 ?live=1 可强制实时计算
+        if (!$request->boolean('live')
+            && $periodStart->day === 1
+            && $periodEnd->isSameDay($periodStart->copy()->endOfMonth())
+            && $periodEnd->isPast()
+        ) {
+            $period = $periodStart->format('Y-m');
+            $snapshotRows = DB::table('sales_stats_snapshots')
+                ->where('period', $period)
+                ->whereIn('customer_id', $customerIds)
+                ->orderBy('id')
+                ->get();
+            if ($snapshotRows->isNotEmpty()) {
+                $rows = $snapshotRows->map(fn ($r) => json_decode($r->data, true))
+                    ->sortByDesc('spending')->values();
+                return $this->success([
+                    'customers' => $rows,
+                    'summary' => $this->summaryFromRows($rows),
+                    'sales_persons' => $this->salesPersonList(),
+                    'period' => [
+                        'start' => $periodStart->toDateString(),
+                        'end' => $periodEnd->toDateString(),
+                    ],
+                    'from_snapshot' => true,
+                    'snapshotted_at' => (string) $snapshotRows->first()->snapshotted_at,
+                ]);
+            }
         }
 
         // 预查：balance_deducted=false 但有实际扣款交易的订阅ID（含续费）
@@ -317,9 +368,19 @@ class SalesStatsNewController extends Controller
             }
         }
 
-        // 4b. 新开中转成本：cost_price * 实际中转月数（中转可能晚于IP开通，按中转创建到订阅到期算）
+        // 4b. 新开中转成本：cost_price * 实际中转月数（中转可能晚于IP开通，按中转创建到首期到期日算）
+        // 用首期到期日（started_at + 首期时长）而非当前 expires_at：续费会推后 expires_at，
+        // 若用当前值，续费月数会被算进新开成本，与 4d 续费段重复，且历史报表随续费漂移
         $newFwdCostData = [];
-        $fwdMonthsExpr = "GREATEST(DATEDIFF(subscriptions.expires_at, GREATEST(forward_rules.created_at, subscriptions.started_at)) / 30.0, 0.1)";
+        $initialDaysExpr = "(COALESCE(subscriptions.initial_duration, subscriptions.duration) * CASE COALESCE(subscriptions.initial_unit, subscriptions.unit)
+            WHEN 1 THEN 1
+            WHEN 2 THEN 7
+            WHEN 3 THEN 30
+            WHEN 4 THEN 365
+            ELSE 30
+        END)";
+        $initialEndExpr = "DATE_ADD(subscriptions.started_at, INTERVAL {$initialDaysExpr} DAY)";
+        $fwdMonthsExpr = "GREATEST(DATEDIFF({$initialEndExpr}, GREATEST(forward_rules.created_at, subscriptions.started_at)) / 30.0, 0.1)";
         $newFwdCostRows = DB::table('forward_rules')
             ->join('subscriptions', 'forward_rules.subscription_id', '=', 'subscriptions.id')
             ->leftJoin('forward_plans', 'forward_rules.forward_plan_id', '=', 'forward_plans.id')
@@ -397,7 +458,9 @@ class SalesStatsNewController extends Controller
             })
             ->join('forward_rules', function ($join) {
                 $join->on('forward_rules.subscription_id', '=', 'subscriptions.id')
-                    ->where('forward_rules.status', 'active');
+                    ->where('forward_rules.status', 'active')
+                    // 中转规则须在续费之前已存在，否则该笔续费款不含中转费（升级成本由 4e 覆盖）
+                    ->whereColumn('forward_rules.created_at', '<=', 'transactions.created_at');
             })
             ->leftJoin('forward_plans', 'forward_rules.forward_plan_id', '=', 'forward_plans.id')
             ->whereIn('transactions.customer_id', $customerIds)
@@ -424,6 +487,18 @@ class SalesStatsNewController extends Controller
         }
 
         // 4e. 中途升级中转成本（订阅非本期新开，但中转规则本期创建，仅 active 规则）
+        // 月数优先用升级扣款金额 ÷ 单月转发费反推（冻结值）；无扣款记录时回退到
+        // expires_at - 创建日（后者会随续费漂移，但续费部分已由 4d 覆盖，仅少数免费升级走此路径）
+        $upgradeFwdMonthsExpr = "COALESCE(
+            (SELECT SUM(ABS(t.amount)) FROM transactions t
+             WHERE t.related_id = subscriptions.id
+               AND t.related_type = 'App\\\\Models\\\\Subscription'
+               AND t.type = 'deduction' AND t.amount < 0
+               AND t.created_at >= forward_rules.created_at - INTERVAL 10 MINUTE
+               AND t.created_at <= forward_rules.created_at + INTERVAL 10 MINUTE
+            ) / NULLIF(forward_rules.forward_fee, 0),
+            GREATEST(DATEDIFF(subscriptions.expires_at, forward_rules.created_at) / 30.0, 0.1)
+        )";
         $upgradeFwdCostData = [];
         $upgradeFwdCostRows = DB::table('forward_rules')
             ->join('subscriptions', 'forward_rules.subscription_id', '=', 'subscriptions.id')
@@ -437,7 +512,7 @@ class SalesStatsNewController extends Controller
             ->where('subscriptions.started_at', '<', $periodStart)
             ->select(
                 DB::raw("{$costCustExpr} as customer_id"),
-                DB::raw('SUM(COALESCE(forward_plans.cost_price, 0) * GREATEST(DATEDIFF(subscriptions.expires_at, forward_rules.created_at) / 30.0, 0.1)) as fwd_cost')
+                DB::raw("SUM(COALESCE(forward_plans.cost_price, 0) * {$upgradeFwdMonthsExpr}) as fwd_cost")
             )
             ->groupBy(DB::raw($costCustExpr))
             ->get();
@@ -711,7 +786,9 @@ class SalesStatsNewController extends Controller
             })
             ->join('forward_rules', function ($join) {
                 $join->on('forward_rules.subscription_id', '=', 'subscriptions.id')
-                    ->where('forward_rules.status', 'active');
+                    ->where('forward_rules.status', 'active')
+                    // 中转规则须在续费之前已存在（同 4d）
+                    ->whereColumn('forward_rules.created_at', '<=', 'transactions.created_at');
             })
             ->leftJoin('forward_plans', 'forward_rules.forward_plan_id', '=', 'forward_plans.id')
             ->whereIn('transactions.customer_id', $customerIds)
@@ -750,7 +827,7 @@ class SalesStatsNewController extends Controller
             ->where('subscriptions.started_at', '<', $periodStart)
             ->select(
                 DB::raw("{$costCustExpr} as customer_id"),
-                DB::raw("SUM({$fwdHardExpr} * GREATEST(DATEDIFF(subscriptions.expires_at, forward_rules.created_at) / 30.0, 0.1)) as fwd_cost")
+                DB::raw("SUM({$fwdHardExpr} * {$upgradeFwdMonthsExpr}) as fwd_cost")
             )
             ->groupBy(DB::raw($costCustExpr))
             ->get();

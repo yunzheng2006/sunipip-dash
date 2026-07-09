@@ -195,14 +195,14 @@ class SparkApiService
     /**
      * 获取订单状态
      */
-    public function getOrder(string $reqOrderNo, string $orderNo, int $page = 1, int $pageSize = 100): array
+    public function getOrder(string $reqOrderNo, ?string $orderNo = null, int $page = 1, int $pageSize = 100): array
     {
-        return $this->request('GetOrder', [
+        return $this->request('GetOrder', array_filter([
             'reqOrderNo' => $reqOrderNo,
             'orderNo' => $orderNo,
             'page' => $page,
             'pageSize' => $pageSize,
-        ]);
+        ]));
     }
 
     /**

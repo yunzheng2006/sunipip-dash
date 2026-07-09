@@ -26,7 +26,21 @@ class RetryFailedForwards extends Command
 
     public function handle(): int
     {
-        $query = ForwardRule::where('status', 'failed');
+        // 只重试活跃订阅的规则：过期/退款/取消订阅遗留的 failed 规则不能重建，
+        // 否则会给已退订的客户复活转发并重复加价。
+        // "删除失败"是逆向操作失败（该删没删掉），语义与创建失败相反，同样不能重建
+        $query = ForwardRule::where('status', 'failed')
+            ->where(function ($q) {
+                $q->whereNull('error_message')
+                  ->orWhere(function ($q2) {
+                      $q2->where('error_message', 'not like', '删除失败%')
+                         ->where('error_message', 'not like', '[重试中] 删除失败%');
+                  });
+            })
+            ->whereHas('subscription', function ($q) {
+                $q->where('status', 'active')
+                  ->where('expires_at', '>', now());
+            });
 
         if ($batch = $this->option('batch')) {
             $query->where('batch_id', $batch);
@@ -72,10 +86,14 @@ class RetryFailedForwards extends Command
 
         $count = 0;
         foreach ($failed as $rule) {
-            // 状态复位为 pending
+            // 状态复位为 pending；保留原错误信息便于诊断和限流统计（避免重复加前缀）
+            $origErr = $rule->error_message;
+            if ($origErr && !str_starts_with($origErr, '[重试中]')) {
+                $origErr = "[重试中] {$origErr}";
+            }
             $rule->update([
                 'status' => 'pending',
-                'error_message' => null,
+                'error_message' => $origErr,
             ]);
             AttachForwardJob::dispatch($rule->id);
             $count++;

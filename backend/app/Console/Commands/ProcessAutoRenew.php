@@ -86,7 +86,12 @@ class ProcessAutoRenew extends Command
                 $failed++;
                 $reason = $e->getMessage();
 
-                if ($isFinalAttempt) {
+                // 只有确定性失败（余额不足）才在最终日强制过期；
+                // 数据库死锁/上游超时等临时性错误留给到期后的正常过期流程处理，
+                // 避免有钱的客户因一次抖动被关停 + auto_renew 被永久关闭
+                $isDeterministicFail = str_contains($reason, '余额不足');
+
+                if ($isFinalAttempt && $isDeterministicFail) {
                     // Final attempt failed — expire the subscription
                     $sub->update(['status' => 'expired', 'auto_renew' => 0]);
 
@@ -100,6 +105,8 @@ class ProcessAutoRenew extends Command
 
                     $expired++;
                     $this->error("  ✗ #{$sub->id} FINAL FAIL → expired: {$reason}");
+                } elseif ($isFinalAttempt) {
+                    $this->warn("  ✗ #{$sub->id} 临时性错误，交由正常过期流程处理: {$reason}");
                 } else {
                     $this->warn("  ✗ #{$sub->id} failed (will retry tomorrow): {$reason}");
                 }

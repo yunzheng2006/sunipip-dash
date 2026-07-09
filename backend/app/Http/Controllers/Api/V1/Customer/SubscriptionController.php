@@ -136,6 +136,14 @@ class SubscriptionController extends Controller
         if ($isExpired && $sub->expires_at->diffInDays(now()) > 3) {
             return $this->error('该订阅已过期超过3天，无法续费', 422);
         }
+        // 测试订阅不走自助续费（应走转正流程）；IP 已回收/释放的续费只会白扣钱
+        if ($sub->is_test) {
+            return $this->error('测试订阅无法自助续费，请联系客户经理转正', 422);
+        }
+        $renewIp = $sub->proxyIp()->withTrashed()->first();
+        if ($isExpired && (!$renewIp || $renewIp->trashed() || in_array($renewIp->status, ['released'], true))) {
+            return $this->error('该订阅的 IP 已被回收，无法续费，请重新购买或联系客户经理', 422);
+        }
 
         $data = $request->validate([
             'duration' => 'nullable|integer|min:1|max:12',
@@ -211,7 +219,14 @@ class SubscriptionController extends Controller
 
         $proxyIp = $sub->proxyIp;
         $originalPrice = (float) $sub->price;
-        $refundAmount = max(0, $originalPrice - $releaseFee);
+        // price 历史上出现过虚高（中转费重复累加/时长双乘），退款上限以该订阅实付净额为准
+        $netPaid = (float) Transaction::where('related_type', Subscription::class)
+            ->where('related_id', $sub->id)
+            ->whereIn('type', [Transaction::TYPE_PURCHASE, Transaction::TYPE_RENEW, Transaction::TYPE_DEDUCTION])
+            ->where('amount', '<', 0)
+            ->sum('amount');
+        $refundBase = $netPaid < 0 ? min($originalPrice, abs($netPaid)) : $originalPrice;
+        $refundAmount = max(0, $refundBase - $releaseFee);
 
         // ── 第1步：API 释放（必须成功才退款）──
         $sparkResult = null;
@@ -243,7 +258,14 @@ class SubscriptionController extends Controller
         try { app(\App\Services\Xui\XuiForwardService::class)->deleteForSubscription($sub); } catch (\Throwable) {}
 
         // ── 第3步：API 释放成功 → 执行退订+退款 ──
+        try {
         DB::transaction(function () use ($sub, $customer, $data, $refundAmount, $releaseFee, $originalPrice, $proxyIp) {
+            // 幂等：事务内加锁复查，防止双击/并发退订双倍退款
+            $locked = Subscription::lockForUpdate()->find($sub->id);
+            if (!$locked || $locked->status !== 'active') {
+                throw new \RuntimeException('订阅状态已变更（可能已退订），本次退订中止');
+            }
+
             $sub->update([
                 'status' => 'refunded',
                 'refunded_at' => now(),
@@ -302,6 +324,9 @@ class SubscriptionController extends Controller
                 ]);
             }
         });
+        } catch (\RuntimeException $e) {
+            return $this->error($e->getMessage(), 422);
+        }
 
         try { \App\Services\Feishu\FeishuSyncTrigger::triggerForCustomer($customer->id); } catch (\Throwable) {}
 

@@ -423,7 +423,8 @@ class SparkProvisionService
                     $this->attachXuiForwards($createdSubIds, $requestData['xui_forward'], $createdIpIds);
                 }
                 if (!empty($requestData['forward_plan_id'])) {
-                    $this->attachForwardByPlan($createdSubIds, (int) $requestData['forward_plan_id']);
+                    $this->attachForwardByPlan($createdSubIds, (int) $requestData['forward_plan_id'],
+                        isset($requestData['forward_fee']) ? (float) $requestData['forward_fee'] : null);
                 }
             } else {
                 Log::info('SparkProvisionService: deferring forward attachment until credentials are backfilled', [
@@ -433,10 +434,67 @@ class SparkProvisionService
             }
         }
 
+        // 部分开通自动退差额：订单已终态（2完成/3失败）但实际开通数 < 下单数时，
+        // 按缺口数 × 单条总价退回余额（幂等：按订单号只退一次）
+        $this->refundShortfall($sparkOrder, $requestData);
+
         return [
             'subscription_ids' => $createdSubIds,
             'proxy_ip_ids' => $createdIpIds,
         ];
+    }
+
+    /**
+     * 部分成功/失败订单的差额自动退款（Spark 文档明确要求调用方执行部分退款逆向流程）
+     */
+    private function refundShortfall(SparkOrder $sparkOrder, array $requestData): void
+    {
+        try {
+            $customerId = $requestData['customer_id'] ?? null;
+            $paidByBalance = ($requestData['payment_method'] ?? null) === 'balance';
+            if (!$customerId || !$paidByBalance) return;
+            if (!in_array((int) $sparkOrder->fresh()->status, [2, 3], true)) return; // 仅终态
+
+            $provisioned = SparkInstance::where('spark_order_id', $sparkOrder->id)->count();
+            $ordered = (int) $sparkOrder->amount;
+            $shortfall = $ordered - $provisioned;
+            if ($shortfall <= 0) return;
+
+            $salePrice = (float) ($requestData['sale_price'] ?? 0); // 单月单价
+            $durationMonths = max(\App\Support\DurationHelper::toMonths((int) ($requestData['duration'] ?? 1), (int) ($requestData['unit'] ?? 3)), 1);
+            $refund = round($shortfall * $salePrice * $durationMonths, 2);
+            if ($refund <= 0) return;
+
+            $marker = "订单{$sparkOrder->req_order_no}未开通部分退款";
+            $already = \App\Models\Transaction::where('customer_id', $customerId)
+                ->where('type', \App\Models\Transaction::TYPE_REFUND)
+                ->where('description', 'like', "%{$marker}%")
+                ->exists();
+            if ($already) return;
+
+            DB::transaction(function () use ($customerId, $refund, $shortfall, $ordered, $marker) {
+                $customer = \App\Models\Customer::lockForUpdate()->find($customerId);
+                if (!$customer) return;
+                $before = (float) $customer->balance;
+                $customer->increment('balance', $refund);
+                \App\Models\Transaction::create([
+                    'customer_id' => $customer->id,
+                    'type' => \App\Models\Transaction::TYPE_REFUND,
+                    'amount' => $refund,
+                    'balance_before' => $before,
+                    'balance_after' => round($before + $refund, 2),
+                    'description' => "{$marker}：下单{$ordered}条实开" . ($ordered - $shortfall) . "条，退{$shortfall}条",
+                    'operated_by' => null,
+                ]);
+            });
+            Log::warning('SparkProvisionService: partial provision auto-refunded', [
+                'order_id' => $sparkOrder->id, 'ordered' => $ordered, 'shortfall' => $shortfall, 'refund' => $refund,
+            ]);
+        } catch (\Throwable $e) {
+            Log::error('SparkProvisionService: refundShortfall failed', [
+                'order_id' => $sparkOrder->id, 'error' => $e->getMessage(),
+            ]);
+        }
     }
 
     /**
@@ -556,7 +614,8 @@ class SparkProvisionService
             $this->attachXuiForwards($subIds, $requestData['xui_forward'], $ipIds);
         }
         if (!empty($requestData['forward_plan_id'])) {
-            $this->attachForwardByPlan($subIds, (int) $requestData['forward_plan_id']);
+            $this->attachForwardByPlan($subIds, (int) $requestData['forward_plan_id'],
+                isset($requestData['forward_fee']) ? (float) $requestData['forward_fee'] : null);
         }
 
         if (!empty($requestData['forward']) || !empty($requestData['xui_forward']) || !empty($requestData['forward_plan_id'])) {
@@ -579,7 +638,8 @@ class SparkProvisionService
             $this->attachXuiForwards($subscriptionIds, $requestData['xui_forward'], $proxyIpIds);
         }
         if (!empty($requestData['forward_plan_id'])) {
-            $this->attachForwardByPlan($subscriptionIds, (int) $requestData['forward_plan_id']);
+            $this->attachForwardByPlan($subscriptionIds, (int) $requestData['forward_plan_id'],
+                isset($requestData['forward_fee']) ? (float) $requestData['forward_fee'] : null);
         }
     }
 
@@ -638,7 +698,7 @@ class SparkProvisionService
      * 按 ForwardPlan 挂转发（客户自助下单用）
      * 根据 plan.type 走 NY 或 XUI 路径
      */
-    private function attachForwardByPlan(array $subscriptionIds, int $planId): void
+    private function attachForwardByPlan(array $subscriptionIds, int $planId, ?float $feeOverride = null): void
     {
         $plan = \App\Models\ForwardPlan::find($planId);
         if (!$plan || !$plan->is_active) {
@@ -650,7 +710,8 @@ class SparkProvisionService
             $this->attachForwards($subscriptionIds, [
                 'device_group_id' => $plan->device_group_id,
                 'speed_limit_mbps' => $plan->speed_limit_mbps ?: null,
-                'forward_fee' => (float) $plan->base_price,
+                // 优先用客户实付的单月费（特价客户按实收退款），无记录时回退套餐原价
+                'forward_fee' => $feeOverride !== null ? $feeOverride : (float) $plan->base_price,
             ]);
             // 补充 forward_plan_id 到创建的 ForwardRule
             \App\Models\ForwardRule::whereIn('subscription_id', $subscriptionIds)

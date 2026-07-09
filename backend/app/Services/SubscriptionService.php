@@ -337,10 +337,14 @@ class SubscriptionService
                         $this->renewViaIpipv($proxyIp);
                     }
                 } catch (\Throwable $e) {
-                    \Log::warning('Upstream renewal failed', [
+                    \Log::error('Upstream renewal failed, aborting renewal', [
                         'proxy_ip_id' => $proxyIp->id,
+                        'subscription_id' => $subscription->id,
                         'error' => $e->getMessage(),
                     ]);
+                    // 上游续费失败必须中止并回滚扣款——否则钱扣了但 IP 续不上
+                    // （真实事故：实例已被上游释放，重新激活扣了 ¥260 但 RenewProxy 失败）
+                    throw new \Exception("上游续费失败，未扣款：{$e->getMessage()}");
                 }
             }
 

@@ -67,7 +67,7 @@ class AttachForwardJob implements ShouldQueue
 
             if ($updated->status === 'active' && (float) $updated->forward_fee > 0) {
                 $sub = $updated->subscription;
-                if ($sub) {
+                if ($sub && !$this->feeAlreadyInPrice($sub, $updated)) {
                     $sub->increment('price', (float) $updated->forward_fee);
                 }
             }
@@ -90,6 +90,36 @@ class AttachForwardJob implements ShouldQueue
                 'trace' => substr($e->getTraceAsString(), 0, 300),
             ]);
         }
+    }
+
+    /**
+     * 判断中转费是否已包含在 subscription.price 中（是则跳过 increment 避免重复加价）
+     *
+     * 判据（数据本身，而非时钟）：
+     * 1. 该订阅的 SparkOrder 下单时带 forward_plan_id → 购买时 price 已含中转费
+     * 2. 且当前规则是该订阅的首条转发规则（降级后重新升级的规则须正常加价）
+     * 兜底：查不到订单时退回"订阅与规则同时创建（60秒内）"的时间戳判断
+     */
+    private function feeAlreadyInPrice($sub, ForwardRule $rule): bool
+    {
+        $isInitialRule = !ForwardRule::where('subscription_id', $sub->id)
+            ->where('id', '<', $rule->id)
+            ->exists();
+
+        if ($isInitialRule && $sub->proxy_ip_id) {
+            $orderFwdPlan = \Illuminate\Support\Facades\DB::table('spark_instances')
+                ->join('spark_orders', 'spark_orders.id', '=', 'spark_instances.spark_order_id')
+                ->where('spark_instances.proxy_ip_id', $sub->proxy_ip_id)
+                ->value('spark_orders.request_data');
+            if ($orderFwdPlan !== null) {
+                $rd = json_decode($orderFwdPlan, true);
+                return !empty($rd['forward_plan_id']);
+            }
+        }
+
+        // 兜底：同时创建视为购买时已含中转费
+        return $isInitialRule
+            && abs(strtotime($sub->created_at) - strtotime($rule->created_at)) < 60;
     }
 
     public function failed(\Throwable $exception): void

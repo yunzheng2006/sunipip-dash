@@ -39,13 +39,7 @@ class ExpireSubscriptions extends Command
                 $this->line("  [标记过期] 订阅 #{$sub->id} ({$sub->customer?->customer_name})");
             } else {
                 $sub->update(['status' => 'expired']);
-
-                // 立即释放上游实例，避免继续被 upstream:auto-renew 续费浪费钱
-                $ip = $sub->proxyIp;
-                if ($ip && !$ip->trashed() && !$this->hasOtherActiveSub($ip->id, $sub->id)) {
-                    $this->releaseUpstream($ip);
-                    $this->line("  → 已释放上游实例 (IP #{$ip->id} {$ip->ip_address})");
-                }
+                // 不在此处释放上游实例 — 保留赎回窗口，由步骤 2+3 的 3 天宽限期统一处理
             }
             $stats['marked']++;
         }
@@ -66,7 +60,10 @@ class ExpireSubscriptions extends Command
                 $this->line("  [测试回收] IP #{$ip->id} {$ip->ip_address} (订阅 #{$sub->id})");
             } else {
                 $this->cleanForwards($sub);
-                $this->releaseUpstream($ip);
+                if (!$this->releaseUpstream($ip)) {
+                    $this->warn("  [保留] 测试IP #{$ip->id} 上游释放失败，下次运行重试");
+                    continue;
+                }
                 $this->releaseAndDelete($ip, $sub, '测试IP自动回收(cron)');
             }
         }
@@ -87,6 +84,17 @@ class ExpireSubscriptions extends Command
             if (!$ip || $ip->trashed()) continue;
             if ($this->hasOtherActiveSub($ip->id, $sub->id)) continue;
 
+            // 逐条重查最新状态：批处理期间运营可能已续费/重激活（TOCTOU 竞态），
+            // 按开头的陈旧快照执行会把刚续费的实例删掉
+            if (!$dryRun) {
+                $freshSub = Subscription::find($sub->id);
+                if (!$freshSub || $freshSub->status !== 'expired'
+                    || $freshSub->expires_at > $gracePeriodEnd) {
+                    $this->line("  [跳过] 订阅 #{$sub->id} 状态已变更（可能已续费）");
+                    continue;
+                }
+            }
+
             $isSpark = !empty($ip->spark_instance_id);
             $isIpipv = !empty($ip->ipipv_instance_id);
             $label = $isSpark ? 'Spark' : ($isIpipv ? 'IPIPV' : '非Spark');
@@ -95,7 +103,11 @@ class ExpireSubscriptions extends Command
                 $this->line("  [删除] {$label} IP #{$ip->id} {$ip->ip_address} 宽限期已过 (订阅 #{$sub->id})");
             } else {
                 $this->cleanForwards($sub);
-                $this->releaseUpstream($ip);
+                if (!$this->releaseUpstream($ip)) {
+                    // 上游释放失败：保留本地记录等下次重试，软删会让实例永久脱离视野继续扣币
+                    $this->warn("  [保留] IP #{$ip->id} 上游释放失败，下次运行重试");
+                    continue;
+                }
                 $this->releaseAndDelete($ip, $sub, '订阅过期超3天宽限期，自动清理');
             }
             if ($isSpark) {
@@ -113,6 +125,9 @@ class ExpireSubscriptions extends Command
             ->where(function ($q) {
                 $q->where('is_test_pool', false)->orWhereNull('is_test_pool');
             })
+            // 只清理"曾经有过订阅"的 IP：手动导入待分配的库存 IP 从未有订阅，
+            // 不加此条件会在导入后的下个整点被误删
+            ->whereHas('subscriptions')
             ->whereDoesntHave('subscriptions', function ($q) {
                 $q->where('status', 'active');
             })
@@ -137,7 +152,10 @@ class ExpireSubscriptions extends Command
                     $this->cleanForwards($expiredSub);
                 }
 
-                $this->releaseUpstream($ip);
+                if (!$this->releaseUpstream($ip)) {
+                    $this->warn("  [保留] 废弃IP #{$ip->id} 上游释放失败，下次运行重试");
+                    continue;
+                }
 
                 $ip->update([
                     'status' => 'expired',
@@ -210,8 +228,10 @@ class ExpireSubscriptions extends Command
             ->exists();
     }
 
-    private function releaseUpstream(ProxyIp $ip): void
+    /** @return bool 上游释放是否成功（无上游实例视为成功）；失败时调用方应保留本地记录待重试 */
+    private function releaseUpstream(ProxyIp $ip): bool
     {
+        $ok = true;
         if ($ip->spark_instance_id) {
             try {
                 $spark = app(\App\Services\SparkApiService::class);
@@ -230,6 +250,10 @@ class ExpireSubscriptions extends Command
                 ]);
                 $this->line("    Spark DelProxy: {$ip->spark_instance_id}");
             } catch (\Throwable $e) {
+                // 实例已不存在类错误视为"已释放"，其他错误保留待重试
+                if (stripos($e->getMessage(), 'not found') === false && stripos($e->getMessage(), 'not exist') === false) {
+                    $ok = false;
+                }
                 Log::error('ExpireSubscriptions: Spark release failed', [
                     'instance_id' => $ip->spark_instance_id,
                     'error' => $e->getMessage(),
@@ -251,11 +275,16 @@ class ExpireSubscriptions extends Command
                 ]);
                 $this->line("    IPIPV release: {$ip->ipipv_instance_id}");
             } catch (\Throwable $e) {
+                if (stripos($e->getMessage(), 'not found') === false && stripos($e->getMessage(), 'not exist') === false) {
+                    $ok = false;
+                }
                 Log::error('ExpireSubscriptions: IPIPV release failed', [
                     'instance_id' => $ip->ipipv_instance_id,
                     'error' => $e->getMessage(),
                 ]);
             }
         }
+
+        return $ok;
     }
 }

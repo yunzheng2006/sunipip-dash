@@ -277,19 +277,22 @@ class SparkController extends Controller
         } catch (\Exception $e) {
             if (isset($purchaseTxn)) {
                 $refundAmt = abs((float) $purchaseTxn->amount);
-                $refundCustomer = \App\Models\Customer::find($purchaseTxn->customer_id);
-                if ($refundCustomer) {
-                    $refundCustomer->increment('balance', $refundAmt);
-                    \App\Models\Transaction::create([
-                        'customer_id'    => $refundCustomer->id,
-                        'type'           => \App\Models\Transaction::TYPE_REFUND,
-                        'amount'         => $refundAmt,
-                        'balance_before' => (float) $refundCustomer->balance - $refundAmt,
-                        'balance_after'  => (float) $refundCustomer->balance,
-                        'description'    => "开通失败自动退款 ¥{$refundAmt}",
-                        'operated_by'    => $request->user()?->id,
-                    ]);
-                }
+                DB::transaction(function () use ($purchaseTxn, $refundAmt, $request) {
+                    $refundCustomer = \App\Models\Customer::lockForUpdate()->find($purchaseTxn->customer_id);
+                    if ($refundCustomer) {
+                        $before = (float) $refundCustomer->balance;
+                        $refundCustomer->increment('balance', $refundAmt);
+                        \App\Models\Transaction::create([
+                            'customer_id'    => $refundCustomer->id,
+                            'type'           => \App\Models\Transaction::TYPE_REFUND,
+                            'amount'         => $refundAmt,
+                            'balance_before' => $before,
+                            'balance_after'  => round($before + $refundAmt, 2),
+                            'description'    => "开通失败自动退款 ¥{$refundAmt}",
+                            'operated_by'    => $request->user()?->id,
+                        ]);
+                    }
+                });
             }
 
             Log::error('Spark provision failed', ['error' => $e->getMessage(), 'data' => $data]);

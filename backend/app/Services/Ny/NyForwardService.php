@@ -97,6 +97,15 @@ class NyForwardService
             throw new NyApiException('NY 面板未启用');
         }
 
+        // 只为激活订阅创建转发：退款/取消/过期订阅遗留的规则不得重建（防复活+重复加价）
+        if ($subscription->status !== 'active') {
+            $rule->update([
+                'status' => 'failed',
+                'error_message' => "订阅状态为 {$subscription->status}，不创建转发",
+            ]);
+            throw new NyApiException('订阅非激活状态，不创建转发');
+        }
+
         // 标记为处理中（防止并发重复处理）
         if ($rule->status === 'pending') {
             $rule->update(['status' => 'processing']);
@@ -112,23 +121,32 @@ class NyForwardService
                 $config['speed_limit'] = (int) ($rule->speed_limit_mbps * 125000);
             }
 
-            $api->createForward([
-                'name' => $rule->name,
-                'device_group_in' => (int) $deviceGroup->remote_id,
-                'device_group_out' => null,
-                'config' => json_encode($config, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE),
-            ]);
-
-            // PUT /user/forward 不返回 rule id，search_rules 查回来
-            $rules = $api->searchRules([
+            // 幂等：先按名称查上游是否已存在（上次创建成功但查询失败的场景），
+            // 存在则直接收养，避免重试时重复创建产生上游孤儿规则
+            $searchParams = [
                 'gid_in' => (int) $deviceGroup->remote_id,
                 'gid_out' => 0,
                 'name' => $rule->name,
                 'dest' => '',
                 'listen_port' => 0,
-            ]);
+            ];
+            $existing = collect($api->searchRules($searchParams))
+                ->first(fn($r) => ($r['name'] ?? '') === $rule->name);
 
-            $found = collect($rules)->first(fn($r) => ($r['name'] ?? '') === $rule->name);
+            if (!$existing) {
+                $api->createForward([
+                    'name' => $rule->name,
+                    'device_group_in' => (int) $deviceGroup->remote_id,
+                    'device_group_out' => null,
+                    'config' => json_encode($config, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE),
+                ]);
+
+                // PUT /user/forward 不返回 rule id，search_rules 查回来
+                $existing = collect($api->searchRules($searchParams))
+                    ->first(fn($r) => ($r['name'] ?? '') === $rule->name);
+            }
+
+            $found = $existing;
             if (!$found) {
                 throw new NyApiException('创建成功但未能查回 rule id');
             }
