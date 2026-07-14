@@ -113,7 +113,7 @@
       <el-table :data="pagedCustomers" v-loading="loading" stripe>
         <el-table-column prop="customer_name" label="客户名" min-width="150">
           <template #default="{ row }">
-            {{ row.customer_name }}
+            <el-link type="primary" :underline="false" style="font-weight:600" @click="openDetail(row)">{{ row.customer_name }}</el-link>
             <el-tag v-if="row.has_manual" size="small" type="warning" style="margin-left:4px">手动</el-tag>
           </template>
         </el-table-column>
@@ -212,6 +212,150 @@
         />
       </div>
     </el-card>
+
+    <!-- 客户业绩明细 Dialog -->
+    <el-dialog v-model="detailVisible" width="1080px" top="4vh" :close-on-click-modal="true">
+      <template #header>
+        <span style="font-weight:600;font-size:16px">
+          {{ detailRow?.customer_name }} — 业绩明细
+          <span style="color:#909399;font-size:13px;font-weight:400;margin-left:8px" v-if="detail?.period">{{ detail.period.start }} ~ {{ detail.period.end }}</span>
+        </span>
+      </template>
+      <div v-loading="detailLoading" style="min-height:200px">
+        <template v-if="detail">
+          <!-- 汇总对照 -->
+          <div class="dt-summary">
+            <div class="dt-chip">消费 <b class="money">¥{{ formatNum(detailRow?.spending) }}</b></div>
+            <div class="dt-chip">返佣 <b style="color:#F56C6C">¥{{ formatNum(detailRow?.commission) }}</b></div>
+            <div class="dt-chip">净业绩 <b style="color:#E8913A">¥{{ formatNum(detailRow?.net_performance) }}</b></div>
+            <div class="dt-chip">销售成本 <b style="color:#409EFF">¥{{ formatNum(detailRow?.sales_cost) }}</b></div>
+            <div class="dt-chip" v-if="canViewHardCost">总硬成本 <b style="color:#E6A23C">¥{{ formatNum(detailRow?.hard_cost) }}</b></div>
+            <div class="dt-chip">利润 <b :style="{color: (detailRow?.profit ?? 0) >= 0 ? '#67C23A' : '#F56C6C'}">¥{{ formatNum(detailRow?.profit) }}</b></div>
+          </div>
+
+          <!-- 交易流水 -->
+          <div class="dt-section" v-if="detail.transactions?.length">
+            <div class="dt-title">交易流水（时段内全部，"计入消费"列为该笔对消费的贡献）</div>
+            <el-table :data="detail.transactions" size="small" border max-height="260">
+              <el-table-column prop="created_at" label="时间" width="150" />
+              <el-table-column prop="type" label="类型" width="110" />
+              <el-table-column label="金额" width="100" align="right">
+                <template #default="{ row }"><span :style="{color: row.amount < 0 ? '#F56C6C' : '#67C23A'}">{{ formatNum(row.amount) }}</span></template>
+              </el-table-column>
+              <el-table-column prop="description" label="备注" min-width="220" show-overflow-tooltip />
+              <el-table-column label="计入消费" width="100" align="right">
+                <template #default="{ row }">
+                  <span v-if="row.spending_effect" :style="{color: row.spending_effect > 0 ? '#E8913A' : '#F56C6C', fontWeight: 600}">{{ formatNum(row.spending_effect) }}</span>
+                  <span v-else style="color:#C0C4CC">不计</span>
+                </template>
+              </el-table-column>
+            </el-table>
+          </div>
+
+          <!-- 新开 IP 成本 -->
+          <div class="dt-section" v-if="detail.new_subs?.length">
+            <div class="dt-title">新开 IP 成本（本期开通/转正，成本=单月×月数）</div>
+            <el-table :data="detail.new_subs" size="small" border max-height="240">
+              <el-table-column prop="sub_id" label="订阅" width="70" />
+              <el-table-column prop="ip" label="IP" min-width="130" />
+              <el-table-column prop="started_at" label="开始" width="150" />
+              <el-table-column prop="months" label="月数" width="70" align="right" />
+              <el-table-column prop="price" label="成交价" width="90" align="right" />
+              <el-table-column prop="sales_cost_m" label="销售成本/月" width="100" align="right" />
+              <el-table-column prop="sales_subtotal" label="销售成本小计" width="105" align="right" />
+              <el-table-column v-if="canViewHardCost" prop="hard_cost_m" label="硬成本/月" width="90" align="right" />
+              <el-table-column v-if="canViewHardCost" prop="hard_subtotal" label="硬成本小计" width="95" align="right" />
+              <el-table-column label="备注" width="80">
+                <template #default="{ row }"><el-tag v-if="row.is_convert" size="small" type="info">转正</el-tag></template>
+              </el-table-column>
+            </el-table>
+          </div>
+
+          <!-- 新开中转成本 -->
+          <div class="dt-section" v-if="detail.new_fwd_rules?.length">
+            <div class="dt-title">新开中转成本（随新开订阅的转发规则；已删除规则按实际存活折算）</div>
+            <el-table :data="detail.new_fwd_rules" size="small" border max-height="240">
+              <el-table-column prop="sub_id" label="订阅" width="70" />
+              <el-table-column prop="ip" label="IP" min-width="130" />
+              <el-table-column prop="plan" label="中转套餐" min-width="140" show-overflow-tooltip />
+              <el-table-column label="状态" width="80">
+                <template #default="{ row }">
+                  <el-tag size="small" :type="row.status === 'active' ? 'success' : 'info'">{{ row.status === 'active' ? '在用' : '已删' }}</el-tag>
+                </template>
+              </el-table-column>
+              <el-table-column prop="months" label="月数" width="80" align="right" />
+              <el-table-column prop="cost_m" label="成本/月" width="90" align="right" />
+              <el-table-column prop="sales_subtotal" label="销售成本小计" width="105" align="right" />
+              <el-table-column v-if="canViewHardCost" prop="hard_subtotal" label="硬成本小计" width="95" align="right" />
+            </el-table>
+          </div>
+
+          <!-- 续费成本 -->
+          <div class="dt-section" v-if="detail.renewals?.length">
+            <div class="dt-title">续费成本（本期续费交易，月数按实付金额反推）</div>
+            <el-table :data="detail.renewals" size="small" border max-height="240">
+              <el-table-column prop="sub_id" label="订阅" width="70" />
+              <el-table-column prop="ip" label="IP" min-width="130" />
+              <el-table-column prop="txn_total" label="续费实付" width="90" align="right" />
+              <el-table-column prop="renew_months" label="月数" width="70" align="right" />
+              <el-table-column prop="ip_sales_subtotal" label="IP销售成本" width="95" align="right" />
+              <el-table-column prop="fwd_plan" label="中转套餐" min-width="120" show-overflow-tooltip />
+              <el-table-column prop="fwd_sales_subtotal" label="中转销售成本" width="105" align="right" />
+              <el-table-column v-if="canViewHardCost" prop="ip_hard_subtotal" label="IP硬成本" width="90" align="right" />
+              <el-table-column v-if="canViewHardCost" prop="fwd_hard_subtotal" label="中转硬成本" width="95" align="right" />
+            </el-table>
+          </div>
+
+          <!-- 升级中转成本 -->
+          <div class="dt-section" v-if="detail.upgrade_fwd_rules?.length">
+            <div class="dt-title">升级/换开中转成本（老订阅本期新挂的转发）</div>
+            <el-table :data="detail.upgrade_fwd_rules" size="small" border max-height="240">
+              <el-table-column prop="sub_id" label="订阅" width="70" />
+              <el-table-column prop="ip" label="IP" min-width="130" />
+              <el-table-column prop="plan" label="中转套餐" min-width="140" show-overflow-tooltip />
+              <el-table-column prop="created_at" label="挂载时间" width="150" />
+              <el-table-column prop="months" label="月数" width="80" align="right" />
+              <el-table-column prop="cost_m" label="成本/月" width="90" align="right" />
+              <el-table-column prop="sales_subtotal" label="销售成本小计" width="105" align="right" />
+              <el-table-column v-if="canViewHardCost" prop="hard_subtotal" label="硬成本小计" width="95" align="right" />
+            </el-table>
+          </div>
+
+          <!-- 返佣 -->
+          <div class="dt-section" v-if="detail.commissions?.length">
+            <div class="dt-title">返佣记录（该客户消费触发、支付给推荐人的佣金）</div>
+            <el-table :data="detail.commissions" size="small" border max-height="200">
+              <el-table-column prop="created_at" label="时间" width="150" />
+              <el-table-column prop="commission_amount" label="佣金" width="100" align="right" />
+              <el-table-column prop="trigger_type" label="触发" width="110" />
+              <el-table-column prop="status" label="状态" width="100" />
+            </el-table>
+          </div>
+
+          <!-- 手动条目 -->
+          <div class="dt-section" v-if="detail.manual_entries?.length || detail.old_manual_entries?.length">
+            <div class="dt-title">手动记录</div>
+            <el-table :data="[...(detail.manual_entries || []), ...(detail.old_manual_entries || [])]" size="small" border max-height="200">
+              <el-table-column label="日期" width="110">
+                <template #default="{ row }">{{ row.entry_date || row.performance_date }}</template>
+              </el-table-column>
+              <el-table-column label="业绩" width="100" align="right">
+                <template #default="{ row }">{{ formatNum(row.spending ?? row.amount) }}</template>
+              </el-table-column>
+              <el-table-column label="销售成本" width="100" align="right">
+                <template #default="{ row }">{{ formatNum(row.sales_cost ?? ((row.amount ?? 0) - (row.profit ?? 0))) }}</template>
+              </el-table-column>
+              <el-table-column v-if="canViewHardCost" label="硬成本" width="100" align="right">
+                <template #default="{ row }">{{ formatNum(row.hard_cost) }}</template>
+              </el-table-column>
+              <el-table-column prop="note" label="备注" min-width="160" show-overflow-tooltip />
+            </el-table>
+          </div>
+
+          <el-empty v-if="detailIsEmpty" description="该时段内没有任何业绩/成本明细" :image-size="80" />
+        </template>
+      </div>
+    </el-dialog>
 
     <!-- 导出设置 Dialog -->
     <el-dialog v-model="exportDialogVisible" title="导出销售统计" width="420px">
@@ -335,7 +479,7 @@ import { ref, computed, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Download, Plus, List } from '@element-plus/icons-vue'
 import dayjs from 'dayjs'
-import { getSalesStatsNew, getManualStatEntries, addManualStatEntry, deleteManualStatEntry } from '@/api/finance'
+import { getSalesStatsNew, getSalesStatsCustomerDetail, getManualStatEntries, addManualStatEntry, deleteManualStatEntry } from '@/api/finance'
 import { getCustomers } from '@/api/customers'
 import { useAuthStore } from '@/stores/auth'
 
@@ -384,6 +528,41 @@ function applyPreset(p) {
   activePreset.value = p.key
   dateRange.value = p.get()
   fetchData()
+}
+
+// ===== 客户业绩明细弹窗 =====
+const detailVisible = ref(false)
+const detailLoading = ref(false)
+const detailRow = ref(null)
+const detail = ref(null)
+const detailIsEmpty = computed(() => {
+  const d = detail.value
+  if (!d) return false
+  return !(d.transactions?.length || d.new_subs?.length || d.new_fwd_rules?.length
+    || d.renewals?.length || d.upgrade_fwd_rules?.length || d.commissions?.length
+    || d.manual_entries?.length || d.old_manual_entries?.length)
+})
+
+async function openDetail(row) {
+  detailRow.value = row
+  detail.value = null
+  detailVisible.value = true
+  detailLoading.value = true
+  try {
+    const params = { customer_id: row.id }
+    if (dateRange.value && dateRange.value.length === 2) {
+      params.date_from = dateRange.value[0]
+      params.date_to = dateRange.value[1]
+    } else {
+      params.date_from = dayjs().format('YYYY-MM-DD')
+      params.date_to = dayjs().format('YYYY-MM-DD')
+    }
+    detail.value = await getSalesStatsCustomerDetail(params)
+  } catch (e) {
+    ElMessage.error('明细加载失败' + (e?.message ? ': ' + e.message : ''))
+  } finally {
+    detailLoading.value = false
+  }
 }
 
 async function fetchData() {
@@ -628,6 +807,22 @@ onMounted(() => {
     display: flex;
     justify-content: flex-end;
     margin-top: 12px;
+  }
+}
+
+.dt-summary {
+  display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 14px;
+  .dt-chip {
+    background: #F5F7FA; border: 1px solid #EBEEF5; border-radius: 8px;
+    padding: 6px 12px; font-size: 13px; color: #606266;
+    b { margin-left: 4px; }
+  }
+}
+.dt-section {
+  margin-bottom: 16px;
+  .dt-title {
+    font-size: 13px; font-weight: 600; color: #303133;
+    margin-bottom: 6px; padding-left: 8px; border-left: 3px solid #409EFF;
   }
 }
 

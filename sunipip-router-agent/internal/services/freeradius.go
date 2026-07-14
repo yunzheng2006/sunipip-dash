@@ -509,14 +509,15 @@ log() { echo "$(date '+%Y-%m-%d %H:%M:%S') $1" >> "$LOGFILE"; }
 MAC=$(echo "$MAC" | tr 'A-Z-' 'a-z:' | sed 's/[^a-f0-9:]//g')
 [ -z "$MAC" ] && exit 0
 
-# Fast path: if this MAC already has an entry with an IP in this user's pool, skip
+# Fast path: if this MAC already has a correct entry (right IP + right lease), skip
 EXISTING_IP=$(grep "^${MAC}," "$DHCP_HOSTS" 2>/dev/null | head -1 | cut -d',' -f2)
 if [ -n "$EXISTING_IP" ]; then
     USER_IPS=$(awk -v u="$USER" '$1 == u {print $2; exit}' "$POOL" 2>/dev/null)
     if echo ",$USER_IPS," | grep -q ",${EXISTING_IP},"; then
-        exit 0
+        # Verify lease time is 8h; old 30m entries fall through for migration
+        grep -q "^${MAC},${EXISTING_IP},8h" "$DHCP_HOSTS" 2>/dev/null && exit 0
     fi
-    # MAC has IP from a different user's pool — remove stale entry and reassign
+    # Wrong pool, wrong lease time, or needs migration — reassign
 fi
 
 log "AUTH: user=$USER mac=$MAC (new)"
@@ -556,7 +557,7 @@ for IP in "${IP_ARRAY[@]}"; do
         log "SKIP: ip=$IP leased to $LEASE_MAC, trying next"
         continue
     fi
-    echo "${MAC},${IP},30m" >> "$TMP"
+    echo "${MAC},${IP},8h" >> "$TMP"
     cat "$TMP" > "$DHCP_HOSTS"
     rm -f "$TMP"
     IFACE=$(ip -o addr show to "${IP%.*}.0/24" 2>/dev/null | awk '{print $2}' | head -1)
@@ -580,7 +581,7 @@ if [ "$FOUND" = "0" ]; then
             [ -z "$OLD_MAC" ] && continue
             if [ -z "$ARP_MACS" ] || ! echo "$ARP_MACS" | grep -qi "$OLD_MAC"; then
                 grep -v "^${OLD_MAC},${IP}," "$TMP" > "${TMP}.new"
-                echo "${MAC},${IP},30m" >> "${TMP}.new"
+                echo "${MAC},${IP},8h" >> "${TMP}.new"
                 cat "${TMP}.new" > "$DHCP_HOSTS"
                 rm -f "$TMP" "${TMP}.new"
                 ip neigh replace "$IP" lladdr "$MAC" dev "$IFACE" nud reachable 2>/dev/null
@@ -599,7 +600,7 @@ if [ "$FOUND" = "0" ]; then
     touch /var/log/sunipip/dnsmasq-restart-needed
     for IP in "${IP_ARRAY[@]}"; do
         if ! grep -q ",${IP}," "$TMP" 2>/dev/null; then
-            echo "${MAC},${IP},30m" >> "$TMP"
+            echo "${MAC},${IP},8h" >> "$TMP"
             cat "$TMP" > "$DHCP_HOSTS"
             rm -f "$TMP"
             echo "${MAC} $(date +%s)" >> /var/log/sunipip/grace-macs
@@ -911,11 +912,14 @@ func (s *FreeRadiusService) PruneGraceFile() {
 	os.Chmod(gracePath, 0666)
 }
 
-// loadActiveLeases reads dnsmasq lease files and returns MACs with non-expired leases.
+// loadActiveLeases reads dnsmasq lease files and returns MACs with recently-active leases.
+// Includes a 2-hour buffer after expiry: devices that slept through lease renewal
+// keep their hosts entry, so dnsmasq can still renew them on wake.
 // Lease format: expiry_timestamp MAC IP hostname [client_id]
 func (s *FreeRadiusService) loadActiveLeases() map[string]struct{} {
 	result := make(map[string]struct{})
 	now := time.Now().Unix()
+	const leaseExpiryBuffer int64 = 7200 // 2 hours past expiry
 	for _, lf := range []string{"/var/lib/misc/dnsmasq.leases", "/var/lib/dnsmasq/dnsmasq.leases"} {
 		data, err := os.ReadFile(lf)
 		if err != nil {
@@ -930,7 +934,7 @@ func (s *FreeRadiusService) loadActiveLeases() map[string]struct{} {
 			if err != nil {
 				continue
 			}
-			if expiry > now {
+			if expiry > now-leaseExpiryBuffer {
 				mac := strings.ToLower(fields[1])
 				result[mac] = struct{}{}
 			}

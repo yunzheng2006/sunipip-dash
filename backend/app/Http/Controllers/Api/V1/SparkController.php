@@ -230,6 +230,9 @@ class SparkController extends Controller
         try {
             $provision = app(\App\Services\SparkProvisionService::class);
             $data['created_by'] = $request->user()?->id;
+            // 管理后台走异步：立即返回"开通中"，后台任务轮询入库，
+            // 避免多商品/上游慢时请求超时（报服务器错误但实际已开出）
+            $data['async'] = true;
             $result = $provision->createOrder($data);
 
             if (isset($purchaseTxn) && !empty($result['subscription_ids'])) {

@@ -96,14 +96,47 @@ class ProxyIpController extends Controller
         }
         $paginated = $query->paginate(min((int) $request->input('per_page', 20), 100));
 
-        // 检查是否有开通中的 Spark 订单（status=1，尚未返回 IP）
-        $pendingOrders = \App\Models\SparkOrder::where('status', 1)
+        // 开通中的上游订单（status=1，尚未返回 IP）→ 前端渲染"开通中"占位行
+        $pendingProvisions = collect();
+
+        \App\Models\SparkOrder::where('status', 1)
+            ->where('method', 'CreateProxy')
             ->whereJsonContains('request_data->customer_id', $customer->id)
-            ->where('created_at', '>=', now()->subHour())
-            ->count();
+            ->where('created_at', '>=', now()->subHours(2))
+            ->get(['id', 'amount', 'request_data', 'created_at'])
+            ->each(function ($o) use ($pendingProvisions) {
+                $rd = is_array($o->request_data) ? $o->request_data : [];
+                $pendingProvisions->push([
+                    'source'       => 'spark',
+                    'quantity'     => max((int) $o->amount, 1),
+                    'product_name' => $rd['product_name'] ?? '',
+                    'country_cn'   => $rd['country_cn'] ?? '',
+                    'country_code' => $rd['country_code'] ?? '',
+                    'created_at'   => $o->created_at->toDateTimeString(),
+                ]);
+            });
+
+        \App\Models\IpipvOrder::where('status', 1)
+            ->where('method', 'open')
+            ->whereJsonContains('request_data->customer_id', $customer->id)
+            ->where('created_at', '>=', now()->subHours(2))
+            ->get(['id', 'amount', 'request_data', 'created_at'])
+            ->each(function ($o) use ($pendingProvisions) {
+                $rd = is_array($o->request_data) ? $o->request_data : [];
+                $pendingProvisions->push([
+                    'source'       => 'ipipv',
+                    'quantity'     => max((int) $o->amount, 1),
+                    'product_name' => $rd['product_name'] ?? '',
+                    'country_cn'   => $rd['country_cn'] ?? '',
+                    'country_code' => $rd['country_code'] ?? '',
+                    'created_at'   => $o->created_at->toDateTimeString(),
+                ]);
+            });
 
         $data = $this->paginated($paginated)->getData(true);
-        $data['data']['pending_orders'] = $pendingOrders;
+        // pending_orders 保留旧语义（订单数）供横幅/轮询兼容
+        $data['data']['pending_orders'] = $pendingProvisions->count();
+        $data['data']['pending_provisions'] = $pendingProvisions->values();
         return response()->json($data);
     }
 

@@ -18,7 +18,7 @@ Internet ← eth0 (WAN: DHCP/PPPoE)
     └──────────────────────────────┘
        ↓          ↓           ↓
     eth1        eth2         eth3
-  172.10.0.1   (trunk)     192.168.1.1
+  172.10.0.1   (trunk)     100.64.1.1
   管理口       → AP          有线LAN
 ```
 
@@ -27,7 +27,7 @@ Internet ← eth0 (WAN: DHCP/PPPoE)
 | eth0 | WAN 上网 | DHCP/PPPoE | — |
 | eth1 | 管理口 (隔离无网) | 172.10.0.1/24 | 172.10.0.100-200 |
 | eth2 | AP trunk (802.1Q) | — | 按 VLAN |
-| eth3 | 有线 LAN (不代理) | 192.168.1.1/24 | 192.168.1.100-200 |
+| eth3 | 有线 LAN (不代理) | 100.64.1.1/24 | 100.64.1.100-200 |
 
 ### VLAN 策略
 
@@ -298,7 +298,7 @@ Agent heartbeat (60s) → has_pending_config=true → GET /config → Apply → 
   "network": {
     "wan": { "interface": "eth0", "mode": "dhcp" },
     "management": { "interface": "eth1", "ip": "172.10.0.1/24", "dhcp": {...} },
-    "wired": { "interface": "eth3", "ip": "192.168.1.1/24", "dhcp": {...} },
+    "wired": { "interface": "eth3", "ip": "100.64.1.1/24", "dhcp": {...} },
     "trunk": { "interface": "eth2" },
     "vlans": [{ "vlan_id", "interface", "bridge", "ip", "dhcp": { "range_start", "range_end", "lease", "gateway", "dns" } }]
   },

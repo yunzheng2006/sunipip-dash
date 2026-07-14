@@ -387,7 +387,7 @@ class SubscriptionService
                 $desc .= '（线下已付，不扣余额）';
             }
 
-            Transaction::create([
+            $renewTxn = Transaction::create([
                 'customer_id' => $customer->id,
                 'type' => Transaction::TYPE_RENEW,
                 'amount' => $skipDeduct ? 0 : -$newPrice,
@@ -398,6 +398,37 @@ class SubscriptionService
                 'description' => $desc,
                 'operated_by' => $userId,
             ]);
+
+            // 业绩流水账：续费行（IP + 当前挂着的中转成本 × 续费月数）
+            if (!$skipDeduct && $newPrice > 0) {
+                $renewMonths = max(\App\Support\DurationHelper::toMonths($duration, $unit), 1);
+                $ledgerFwdRule = ForwardRule::with('forwardPlan:id,cost_price,hard_cost_price')
+                    ->where('subscription_id', $subscription->id)
+                    ->where('status', 'active')
+                    ->first();
+                $fwdCostM = (float) ($ledgerFwdRule?->forwardPlan?->cost_price ?? 0);
+                $fwdHardM = (float) ($ledgerFwdRule?->forwardPlan?->hard_cost_price
+                    ?? $ledgerFwdRule?->forwardPlan?->cost_price ?? 0);
+                $ipSalesM = (float) ($subscription->sales_cost ?? 0);
+                $ipHardM = (float) ($subscription->hard_cost ?: $ipSalesM);
+                \App\Services\PerformanceLedger::record([
+                    'event_type' => \App\Services\PerformanceLedger::EVENT_RENEW,
+                    'customer_id' => \App\Services\PerformanceLedger::attributionCustomerId($subscription),
+                    'subscription_id' => $subscription->id,
+                    'forward_rule_id' => $ledgerFwdRule?->id,
+                    'transaction_id' => $renewTxn->id,
+                    'revenue' => $newPrice,
+                    'sales_cost' => ($ipSalesM + $fwdCostM) * $renewMonths,
+                    'hard_cost_ip' => $ipHardM * $renewMonths,
+                    'hard_cost_fwd' => $fwdHardM * $renewMonths,
+                    'months' => $renewMonths,
+                    'meta' => array_filter([
+                        'auto_renew' => $isAutoRenew ?: null,
+                        'reactivate' => $reactivate ?: null,
+                        'was_test' => $wasTest ?: null,
+                    ]),
+                ]);
+            }
 
             return $subscription->fresh();
         });

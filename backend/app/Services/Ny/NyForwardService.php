@@ -35,6 +35,21 @@ class NyForwardService
         ?int $speedLimitMbps,
         float $forwardFee,
     ): ForwardRule {
+        $rule = $this->createPendingRule($subscription, $deviceGroup, $speedLimitMbps, $forwardFee);
+
+        return $this->processRule($rule);
+    }
+
+    /**
+     * 只创建 pending 规则不调上游——供异步路径（结账后由 AttachForwardJob 处理）使用。
+     * 同步创建每条要多次 NY API 往返（实测 ~7.5 秒/条），批量购买时会拖垮结账请求。
+     */
+    public function createPendingRule(
+        Subscription $subscription,
+        NyDeviceGroup $deviceGroup,
+        ?int $speedLimitMbps,
+        float $forwardFee,
+    ): ForwardRule {
         $proxyIp = $subscription->proxyIp()->first();
         if (!$proxyIp) {
             throw new NyApiException('订阅未关联 IP');
@@ -46,7 +61,7 @@ class NyForwardService
         }
 
         // 先插本地记录（pending），失败时也能查到
-        $rule = ForwardRule::create([
+        return ForwardRule::create([
             'subscription_id' => $subscription->id,
             'proxy_ip_id' => $proxyIp->id,
             'ny_panel_id' => $panel->id,
@@ -58,8 +73,6 @@ class NyForwardService
             'forward_fee' => $forwardFee,
             'status' => 'pending',
         ]);
-
-        return $this->processRule($rule);
     }
 
     /**

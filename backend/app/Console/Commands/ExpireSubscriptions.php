@@ -12,6 +12,8 @@ use Illuminate\Support\Facades\Log;
  *
  * 逻辑：
  *   1. 找到所有 status=active && expires_at <= now() 的订阅 → 标记 expired
+ *      （auto_renew=1 且余额足够的先尝试最后一次续费——00:00 的 auto-renew
+ *      任务错过那一分钟不会补跑，调度器故障时开了自动续费的客户会被误过期）
  *   1.5. 测试订单过期后立即回收 + API 释放
  *   2+3. 所有 IP 统一 3 天宽限期 — 过期超 3 天后清理转发 + 软删除 IP
  *   4. 兜底：所有无活跃订阅且超宽限期的废弃 IP → 软删除
@@ -26,7 +28,7 @@ class ExpireSubscriptions extends Command
     public function handle(): int
     {
         $dryRun = $this->option('dry-run');
-        $stats = ['marked' => 0, 'deleted_non_spark' => 0, 'deleted_spark' => 0, 'deleted_orphan' => 0];
+        $stats = ['marked' => 0, 'renewed' => 0, 'deleted_non_spark' => 0, 'deleted_spark' => 0, 'deleted_orphan' => 0];
 
         // ── 步骤 1：标记过期订阅 ──
         $expiredSubs = Subscription::with(['proxyIp', 'customer:id,customer_name'])
@@ -35,6 +37,21 @@ class ExpireSubscriptions extends Command
             ->get();
 
         foreach ($expiredSubs as $sub) {
+            // 逐条重查最新状态：兜底续费要调上游 API，循环期间运营可能已手动续费，
+            // 按开头的陈旧快照执行会误标过期或重复扣款
+            if (!$dryRun) {
+                $sub = Subscription::find($sub->id);
+                if (!$sub || $sub->status !== 'active' || $sub->expires_at->isFuture()) {
+                    continue;
+                }
+            }
+
+            // 兜底：开了自动续费的先尝试最后一次续费，成功则不过期
+            if ($this->tryAutoRenewFallback($sub, $dryRun)) {
+                $stats['renewed']++;
+                continue;
+            }
+
             if ($dryRun) {
                 $this->line("  [标记过期] 订阅 #{$sub->id} ({$sub->customer?->customer_name})");
             } else {
@@ -169,9 +186,81 @@ class ExpireSubscriptions extends Command
         }
 
         $prefix = $dryRun ? '[DRY RUN] ' : '';
-        $this->info("{$prefix}标记过期 {$stats['marked']}，删除非Spark {$stats['deleted_non_spark']}，删除Spark(宽限后) {$stats['deleted_spark']}，清理废弃 {$deadCount}");
+        $this->info("{$prefix}标记过期 {$stats['marked']}，兜底续费 {$stats['renewed']}，删除非Spark {$stats['deleted_non_spark']}，删除Spark(宽限后) {$stats['deleted_spark']}，清理废弃 {$deadCount}");
 
         return 0;
+    }
+
+    /**
+     * 过期前的自动续费兜底。
+     *
+     * ProcessAutoRenew 的 dailyAt('00:00') 错过那一分钟就不补跑（真实事故：
+     * 7/5~7/7 storage 权限混乱导致调度器瘫痪两晚，开着自动续费、余额充足的
+     * 订阅 #2957/#2958 因此被过期）。这里在标记过期前给 auto_renew=1 的订阅
+     * 最后一次续费机会。语义与 ProcessAutoRenew 的最终尝试对齐：
+     * 余额不足 → 关闭 auto_renew 走过期；临时性错误 → 保留 auto_renew 走过期。
+     *
+     * @return bool true=已续费（或 dry-run 中会续费），调用方跳过过期标记
+     */
+    private function tryAutoRenewFallback(Subscription $sub, bool $dryRun): bool
+    {
+        if (!$sub->auto_renew || $sub->is_test) {
+            return false;
+        }
+
+        $customer = \App\Models\Customer::find($sub->customer_id);
+        if (!$customer || (int) $customer->status !== 1) {
+            return false;
+        }
+
+        $service = app(\App\Services\SubscriptionService::class);
+        $renewDuration = $sub->duration ?: 1;
+        $renewUnit = $sub->unit ?: 3;
+
+        try {
+            $monthlyPrice = $service->calcRenewalMonthlyPrice($customer, $sub);
+            $durationMonths = \App\Support\DurationHelper::toMonths($renewDuration, $renewUnit);
+            $renewPrice = round($monthlyPrice * max($durationMonths, 1), 2);
+
+            if ((float) $customer->balance < $renewPrice) {
+                if ($dryRun) {
+                    $this->line("  [兜底续费-余额不足] 订阅 #{$sub->id} 需 ¥{$renewPrice}，余额 ¥{$customer->balance}");
+                    return false;
+                }
+                // 与 ProcessAutoRenew 最终尝试一致：确定性失败关闭自动续费，走正常过期
+                $sub->update(['auto_renew' => 0]);
+                $this->warn("  [兜底续费失败] 订阅 #{$sub->id} 余额不足（需 ¥{$renewPrice}），关闭自动续费并过期");
+                return false;
+            }
+
+            if ($dryRun) {
+                $this->line("  [兜底续费] 订阅 #{$sub->id} ({$customer->customer_name}) ¥{$renewPrice}");
+                return true;
+            }
+
+            $service->renewOne($sub, [
+                'duration' => $renewDuration,
+                'unit' => $renewUnit,
+                'price' => $renewPrice,
+                'auto_renew_triggered' => true,
+            ], null);
+
+            $this->info("  [兜底续费] ✓ 订阅 #{$sub->id} ({$customer->customer_name}) ¥{$renewPrice}（00:00 自动续费被漏跑）");
+            Log::warning("ExpireSubscriptions: 兜底续费成功，订阅 #{$sub->id} 的 00:00 自动续费未执行，请检查调度器", [
+                'subscription_id' => $sub->id,
+                'customer_id' => $customer->id,
+                'price' => $renewPrice,
+            ]);
+            return true;
+        } catch (\Throwable $e) {
+            // 临时性错误（上游续费失败等）：保留 auto_renew，走正常过期流程（宽限期内仍可赎回）
+            $this->warn("  [兜底续费失败] 订阅 #{$sub->id}: {$e->getMessage()}");
+            Log::error('ExpireSubscriptions: auto-renew fallback failed', [
+                'subscription_id' => $sub->id,
+                'error' => $e->getMessage(),
+            ]);
+            return false;
+        }
     }
 
     private function cleanForwards(Subscription $sub): void

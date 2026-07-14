@@ -79,6 +79,15 @@ class ReferralService
             'status' => 'pending',
         ]);
 
+        // 业绩流水账：返佣行（归属消费客户，作为其净业绩的抵减项）
+        \App\Services\PerformanceLedger::record([
+            'event_type' => \App\Services\PerformanceLedger::EVENT_COMMISSION,
+            'customer_id' => $customer->id,
+            'subscription_id' => $triggerId,
+            'commission' => $commission,
+            'meta' => ['referrer_id' => $referrerId, 'trigger_type' => $triggerType, 'commission_id' => $record->id],
+        ]);
+
         if ($this->isAutoCredit()) {
             $this->creditCommission($record);
         }
@@ -262,6 +271,15 @@ class ReferralService
                 }
             }
             $rc->update(['status' => 'reversed']);
+
+            // 业绩流水账：佣金冲销负行（与正向 commission 行对冲）
+            \App\Services\PerformanceLedger::record([
+                'event_type' => \App\Services\PerformanceLedger::EVENT_COMMISSION_REVERSAL,
+                'customer_id' => $customerId,
+                'subscription_id' => $subscriptionId,
+                'commission' => -(float) $rc->commission_amount,
+                'meta' => ['commission_id' => $rc->id, 'referrer_id' => $rc->referrer_id],
+            ]);
         }
 
         // 2. Reverse sales commissions（不限 trigger_type：续费/划转/中转产生的销售提成退款时同样回收）

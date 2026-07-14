@@ -28,14 +28,23 @@ class RetryFailedForwards extends Command
     {
         // 只重试活跃订阅的规则：过期/退款/取消订阅遗留的 failed 规则不能重建，
         // 否则会给已退订的客户复活转发并重复加价。
-        // "删除失败"是逆向操作失败（该删没删掉），语义与创建失败相反，同样不能重建
-        $query = ForwardRule::where('status', 'failed')
-            ->where(function ($q) {
-                $q->whereNull('error_message')
-                  ->orWhere(function ($q2) {
-                      $q2->where('error_message', 'not like', '删除失败%')
-                         ->where('error_message', 'not like', '[重试中] 删除失败%');
-                  });
+        // "删除失败"是逆向操作失败（该删没删掉），语义与创建失败相反，同样不能重建。
+        // 卡住超过 10 分钟的 pending 一并捡起（异步挂载的队列任务丢失时的兜底）
+        $query = ForwardRule::where(function ($q) {
+                $q->where(function ($q2) {
+                    $q2->where('status', 'failed')
+                       ->where(function ($q3) {
+                           $q3->whereNull('error_message')
+                              ->orWhere(function ($q4) {
+                                  $q4->where('error_message', 'not like', '删除失败%')
+                                     ->where('error_message', 'not like', '[重试中] 删除失败%');
+                              });
+                       });
+                })
+                ->orWhere(function ($q2) {
+                    $q2->whereIn('status', ['pending', 'processing'])
+                       ->where('updated_at', '<', now()->subMinutes(10));
+                });
             })
             ->whereHas('subscription', function ($q) {
                 $q->where('status', 'active')

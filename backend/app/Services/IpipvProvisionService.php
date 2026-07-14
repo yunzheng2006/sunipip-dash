@@ -328,6 +328,30 @@ class IpipvProvisionService
                     }
                     $subscriptionIds[] = $sub->id;
 
+                    // 业绩流水账：余额扣款的正式订单记购买行（中转成本由挂载事件另记）
+                    if (!$isTest && ($params['payment_method'] ?? null) === 'balance') {
+                        $purchaseTxnId = DB::table('transactions')
+                            ->where('customer_id', $customerId)
+                            ->where('type', 'purchase')
+                            ->where('amount', '<', 0)
+                            ->whereBetween('created_at', [
+                                $order->created_at->copy()->subSeconds(10),
+                                $order->created_at->copy()->addSeconds(10),
+                            ])
+                            ->value('id');
+                        \App\Services\PerformanceLedger::record([
+                            'event_type' => \App\Services\PerformanceLedger::EVENT_PURCHASE,
+                            'customer_id' => $customerId,
+                            'subscription_id' => $sub->id,
+                            'transaction_id' => $purchaseTxnId,
+                            'revenue' => $totalPrice,
+                            'sales_cost' => (float) ($salesCost ?? 0) * max($durationMonths, 1),
+                            'hard_cost_ip' => (float) ($hardCost ?? 0) * max($durationMonths, 1),
+                            'months' => max($durationMonths, 1),
+                            'meta' => ['source' => 'ipipv', 'order_id' => $order->id],
+                        ]);
+                    }
+
                     IpAssignmentLog::create([
                         'proxy_ip_id'  => $proxyIp->id,
                         'customer_id'  => $customerId,

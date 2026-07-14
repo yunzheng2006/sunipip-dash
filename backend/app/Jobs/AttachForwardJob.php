@@ -70,6 +70,9 @@ class AttachForwardJob implements ShouldQueue
                 if ($sub && !$this->feeAlreadyInPrice($sub, $updated)) {
                     $sub->increment('price', (float) $updated->forward_fee);
                 }
+                if ($sub) {
+                    $this->recordLedger($sub, $updated);
+                }
             }
         } catch (NyApiRateLimitException|LockTimeoutException $e) {
             $reason = $e instanceof NyApiRateLimitException ? '被限流' : '锁超时';
@@ -102,6 +105,12 @@ class AttachForwardJob implements ShouldQueue
      */
     private function feeAlreadyInPrice($sub, ForwardRule $rule): bool
     {
+        // price 连单月中转费都不到，不可能已包含（管理员手动分配 IP 售价 0 + 单独收中转费的场景，
+        // 订阅和规则同时创建会误中下方的时间戳兜底，导致成交价一直显示 0）
+        if ((float) $sub->price < (float) $rule->forward_fee) {
+            return false;
+        }
+
         $isInitialRule = !ForwardRule::where('subscription_id', $sub->id)
             ->where('id', '<', $rule->id)
             ->exists();
@@ -120,6 +129,62 @@ class AttachForwardJob implements ShouldQueue
         // 兜底：同时创建视为购买时已含中转费
         return $isInitialRule
             && abs(strtotime($sub->created_at) - strtotime($rule->created_at)) < 60;
+    }
+
+    /**
+     * 业绩流水账：中转挂载行。
+     * revenue：当期扣费的取扣款金额（挂载 ±10 分钟内的"中转费用"deduction）；
+     * 打包购买的挂载 revenue=0（钱已计在购买行），只记中转成本。
+     * months = 挂载时点到订阅到期的覆盖月数（事件当下的确定值）。
+     */
+    private function recordLedger($sub, ForwardRule $rule): void
+    {
+        // 幂等：同一规则只记一次（重试/重复挂载不重复记账）
+        $exists = \Illuminate\Support\Facades\DB::table('performance_entries')
+            ->where('event_type', \App\Services\PerformanceLedger::EVENT_FORWARD_ATTACH)
+            ->where('forward_rule_id', $rule->id)
+            ->exists();
+        if ($exists || $sub->is_test) {
+            return;
+        }
+
+        $plan = $rule->forward_plan_id
+            ? \Illuminate\Support\Facades\DB::table('forward_plans')
+                ->where('id', $rule->forward_plan_id)
+                ->first(['cost_price', 'hard_cost_price'])
+            : null;
+        $costM = (float) ($plan->cost_price ?? 0);
+        $hardM = (float) ($plan->hard_cost_price ?? $plan->cost_price ?? 0);
+
+        $months = 0.1;
+        if ($sub->expires_at && $sub->expires_at->isFuture()) {
+            $months = max(round(now()->floatDiffInDays($sub->expires_at) / 30, 2), 0.1);
+        }
+
+        // 匹配挂载伴随的扣款：后台"中转费用（本期）订阅#X"或客户自助"升级视频专线 订阅#X"
+        $feeTxn = \Illuminate\Support\Facades\DB::table('transactions')
+            ->where('customer_id', $sub->customer_id)
+            ->where('type', 'deduction')
+            ->where('amount', '<', 0)
+            ->where('description', 'like', "%订阅#{$sub->id}%")
+            ->whereBetween('created_at', [
+                $rule->created_at->copy()->subMinutes(10),
+                $rule->created_at->copy()->addMinutes(10),
+            ])
+            ->first(['id', 'amount']);
+
+        \App\Services\PerformanceLedger::record([
+            'event_type' => \App\Services\PerformanceLedger::EVENT_FORWARD_ATTACH,
+            'customer_id' => \App\Services\PerformanceLedger::attributionCustomerId($sub),
+            'subscription_id' => $sub->id,
+            'forward_rule_id' => $rule->id,
+            'transaction_id' => $feeTxn->id ?? null,
+            'revenue' => $feeTxn ? abs((float) $feeTxn->amount) : 0,
+            'sales_cost' => $costM * $months,
+            'hard_cost_fwd' => $hardM * $months,
+            'months' => $months,
+            'meta' => ['fee' => (float) $rule->forward_fee],
+        ]);
     }
 
     public function failed(\Throwable $exception): void

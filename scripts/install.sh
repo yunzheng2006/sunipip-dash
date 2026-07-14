@@ -326,12 +326,12 @@ iface eth2 inet manual
     down ip link set $IFACE down
 NET_EOF
 
-# eth3 — Wired LAN
+# eth3 — Wired LAN (100.64.x CGNAT 段，避免与上游 192.168.x 同网段冲突)
 cat > /etc/network/interfaces.d/eth3 <<'NET_EOF'
 # eth3 — Wired LAN
 auto eth3
 iface eth3 inet static
-    address 192.168.1.1
+    address 100.64.1.1
     netmask 255.255.255.0
 NET_EOF
 
@@ -339,7 +339,7 @@ ok "Network interfaces configured / 网络接口已配置"
 log "  eth0: WAN (DHCP)"
 log "  eth1: Management 172.10.0.1/24"
 log "  eth2: Trunk (no IP)"
-log "  eth3: Wired LAN 192.168.1.1/24"
+log "  eth3: Wired LAN 100.64.1.1/24"
 
 # ---------------------------------------------------------------------------
 # Step 8: Configure FreeRADIUS / 配置 FreeRADIUS
@@ -430,11 +430,11 @@ DNSMASQ_MGMT_EOF
 
 # Wired LAN DHCP (eth3)
 cat > /etc/dnsmasq.d/02-wired-lan.conf <<'DNSMASQ_LAN_EOF'
-# Wired LAN — eth3 (192.168.1.0/24)
+# Wired LAN — eth3 (100.64.1.0/24)
 interface=eth3
-dhcp-range=interface:eth3,192.168.1.100,192.168.1.200,255.255.255.0,12h
-dhcp-option=interface:eth3,3,192.168.1.1
-dhcp-option=interface:eth3,6,192.168.1.1
+dhcp-range=interface:eth3,100.64.1.100,100.64.1.200,255.255.255.0,12h
+dhcp-option=interface:eth3,3,100.64.1.1
+dhcp-option=interface:eth3,6,100.64.1.1
 DNSMASQ_LAN_EOF
 
 # Ensure no DHCP on eth0, eth2, wg interfaces
@@ -448,7 +448,7 @@ DNSMASQ_GLOBAL_EOF
 
 ok "dnsmasq configured / dnsmasq 已配置"
 log "  eth1: DHCP 172.10.0.100-200"
-log "  eth3: DHCP 192.168.1.100-200"
+log "  eth3: DHCP 100.64.1.100-200"
 
 # ---------------------------------------------------------------------------
 # Step 10: Configure nftables / 配置防火墙
@@ -794,7 +794,7 @@ echo -e "  ${BOLD}Network:${NC}"
 echo -e "    eth0 (WAN):        DHCP"
 echo -e "    eth1 (Management): 172.10.0.1/24"
 echo -e "    eth2 (Trunk):      No IP (802.1Q)"
-echo -e "    eth3 (Wired LAN):  192.168.1.1/24"
+echo -e "    eth3 (Wired LAN):  100.64.1.1/24"
 echo ""
 echo -e "  ${BOLD}Services:${NC}"
 for svc in "${SERVICES[@]}"; do

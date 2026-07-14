@@ -123,6 +123,16 @@
       <div class="ctx-item ctx-danger" @click="confirmDeleteGroup">删除分组</div>
     </div>
 
+    <!-- ===== 开通中占位（开好后由真实数据覆盖） ===== -->
+    <el-card v-if="pendingPlaceholders.length" shadow="never" class="pending-provision-card">
+      <div v-for="(p, idx) in pendingPlaceholders" :key="'pp-' + idx" class="pending-provision-row">
+        <el-icon class="pending-spin"><Loading /></el-icon>
+        <span class="pp-name">{{ p.country_cn || p.country_code || '新订单' }}<template v-if="p.product_name"> · {{ p.product_name }}</template></span>
+        <span class="pp-status">开通中，请稍后…</span>
+        <span class="pp-time">{{ p.created_at }}</span>
+      </div>
+    </el-card>
+
     <!-- ===== 桌面端：表格 ===== -->
     <el-card shadow="never" class="desktop-table">
       <el-table
@@ -471,6 +481,18 @@ const selectedActiveCount = computed(() => selectedRows.value.filter(r => r.acti
 const searchForm = reactive({ keyword: route.query.keyword || '', country: '', product_type: '', sort: '' })
 const pagination = reactive({ page: 1, per_page: 20, total: 0 })
 const pendingOrders = ref(0)
+const pendingProvisions = ref([])
+// 每条待开通 IP 一行占位（数量展开，最多渲染 50 行防刷屏）
+const pendingPlaceholders = computed(() => {
+  const rows = []
+  for (const p of pendingProvisions.value) {
+    for (let i = 0; i < Math.min(p.quantity || 1, 50 - rows.length); i++) {
+      rows.push(p)
+      if (rows.length >= 50) return rows
+    }
+  }
+  return rows
+})
 const remarkInputRef = ref(null)
 const editingRemarkId = ref(null)
 const editingRemarkValue = ref('')
@@ -776,6 +798,7 @@ async function fetchData() {
     tableData.value = res?.items || []
     pagination.total = res?.pagination?.total || 0
     pendingOrders.value = res?.pending_orders || 0
+    pendingProvisions.value = res?.pending_provisions || []
     startPollingIfNeeded()
   } catch {}
   finally { loading.value = false }
@@ -1101,6 +1124,20 @@ $border: #E2E8F0;
 }
 .pending-spin { animation: spin 1.5s linear infinite; }
 @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+
+.pending-provision-card {
+  margin-bottom: 12px; border-radius: 10px;
+  :deep(.el-card__body) { padding: 8px 16px; }
+}
+.pending-provision-row {
+  display: flex; align-items: center; gap: 10px;
+  padding: 10px 12px; margin: 4px 0;
+  color: #E6A23C; font-size: 13px; font-weight: 500;
+  background: #FDF6EC; border: 1px dashed #F3D19E; border-radius: 8px;
+  .pp-name { color: #606266; font-weight: 600; }
+  .pp-status { flex: 1; }
+  .pp-time { color: #94A3B8; font-size: 12px; }
+}
 
 .upgrade-cell {
   display: flex; align-items: center;

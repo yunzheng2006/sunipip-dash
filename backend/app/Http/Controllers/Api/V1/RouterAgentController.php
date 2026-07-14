@@ -88,7 +88,7 @@ NIC_COUNT=${#NICS[@]}
 NIC_WAN="${NICS[0]}"          # 第1口: WAN 上网 (DHCP/PPPoE)
 NIC_MGMT="${NICS[1]}"         # 第2口: 管理口 172.10.0.1
 NIC_AP="${NICS[2]:-}"         # 第3口: AP trunk (802.1Q)
-NIC_LAN="${NICS[3]:-}"        # 第4口: 有线 LAN 192.168.1.1
+NIC_LAN="${NICS[3]:-}"        # 第4口: 有线 LAN 100.64.1.1 (CGNAT 段，避免与上游 192.168.x 冲突，与 Agent 运行时配置一致)
 
 info "网卡检测完成:"
 info "  WAN  (上网):   $NIC_WAN"
@@ -260,9 +260,9 @@ fi
 # 有线 LAN
 if [[ -n "$NIC_LAN" ]]; then
     ip addr flush dev "$NIC_LAN" 2>/dev/null || true
-    ip addr add 192.168.1.1/24 dev "$NIC_LAN" 2>/dev/null || true
+    ip addr add 100.64.1.1/24 dev "$NIC_LAN" 2>/dev/null || true
     ip link set "$NIC_LAN" up
-    info "  $NIC_LAN → 192.168.1.1/24 (有线 LAN)"
+    info "  $NIC_LAN → 100.64.1.1/24 (有线 LAN)"
 fi
 
 # 持久化网络配置
@@ -294,10 +294,10 @@ fi
 if [[ -n "$NIC_LAN" ]]; then
     cat >> /etc/network/interfaces.d/sunipip <<EOF
 
-# 有线 LAN
+# 有线 LAN (100.64.x CGNAT 段，防止与上游 192.168.x 同网段冲突；与 RouterConfigService 下发值一致)
 auto $NIC_LAN
 iface $NIC_LAN inet static
-    address 192.168.1.1
+    address 100.64.1.1
     netmask 255.255.255.0
 EOF
 fi
@@ -329,7 +329,7 @@ if [[ -n "$NIC_LAN" ]]; then
     cat >> /etc/dnsmasq.d/sunipip-base.conf <<EOF
 # 有线 LAN DHCP
 interface=$NIC_LAN
-dhcp-range=192.168.1.10,192.168.1.250,255.255.255.0,12h
+dhcp-range=100.64.1.100,100.64.1.200,255.255.255.0,12h
 EOF
 fi
 
@@ -804,10 +804,10 @@ info "  网卡映射:"
 info "    WAN:  $NIC_WAN (上网)"
 info "    MGMT: $NIC_MGMT → 172.10.0.1 (管理)"
 [[ -n "$NIC_AP" ]]  && info "    AP:   $NIC_AP (trunk → OpenWrt)"
-[[ -n "$NIC_LAN" ]] && info "    LAN:  $NIC_LAN → 192.168.1.1 (有线)"
+[[ -n "$NIC_LAN" ]] && info "    LAN:  $NIC_LAN → 100.64.1.1 (有线)"
 info ""
 info "  管理页面:   http://172.10.0.1"
-[[ -n "$NIC_LAN" ]] && info "  有线 LAN:   http://192.168.1.1"
+[[ -n "$NIC_LAN" ]] && info "  有线 LAN:   http://100.64.1.1"
 info "============================================"
 info ""
 info "Agent 支持热更新 — 平台发布新版本后自动下载并重启。"

@@ -91,6 +91,9 @@ class SparkProvisionService
 
         // status=2 表示 Spark 立即完成开通；status=1 表示异步开通中
         // Spark 异步开通通常 1-5 秒内完成，轮询等待避免返回空结果
+        // async=true（管理后台）：不在 HTTP 请求里原地轮询——多商品/上游慢时会超过
+        // 网关 60s 超时（前端报"服务器错误"但后台实际开出），改由队列任务后台轮询
+        $async = !empty($params['async']);
         $orderStatus = (int) ($result['status'] ?? 1);
         $ipInfo = [];
 
@@ -99,7 +102,7 @@ class SparkProvisionService
                 $pollResult = $this->spark->getOrder($reqOrderNo, $result['orderNo'] ?? null);
                 $ipInfo = $pollResult['ipInfo'] ?? [];
             } catch (\Throwable) {}
-        } elseif ($orderStatus === 1) {
+        } elseif ($orderStatus === 1 && !$async) {
             for ($attempt = 1; $attempt <= 5; $attempt++) {
                 usleep(2_000_000);
                 try {
@@ -126,6 +129,9 @@ class SparkProvisionService
                 ]);
                 throw $e;
             }
+        } elseif ($orderStatus === 1 && $async) {
+            // 后台轮询完成入库（8s 后首查，退避重试；cron 每分钟兜底）
+            \App\Jobs\SyncSparkOrderJob::dispatch($sparkOrder->id)->delay(now()->addSeconds(8));
         }
 
         return [
@@ -393,6 +399,30 @@ class SparkProvisionService
                             ->delay($testReclaimAt);
                     }
                     $createdSubIds[] = $sub->id;
+
+                    // 业绩流水账：余额扣款的正式订单记购买行（中转成本由挂载事件另记）
+                    if (!$isTest && ($requestData['payment_method'] ?? null) === 'balance') {
+                        $purchaseTxnId = DB::table('transactions')
+                            ->where('customer_id', $customerId)
+                            ->where('type', 'purchase')
+                            ->where('amount', '<', 0)
+                            ->whereBetween('created_at', [
+                                $sparkOrder->created_at->copy()->subSeconds(10),
+                                $sparkOrder->created_at->copy()->addSeconds(10),
+                            ])
+                            ->value('id');
+                        \App\Services\PerformanceLedger::record([
+                            'event_type' => \App\Services\PerformanceLedger::EVENT_PURCHASE,
+                            'customer_id' => $customerId,
+                            'subscription_id' => $sub->id,
+                            'transaction_id' => $purchaseTxnId,
+                            'revenue' => $totalPrice,
+                            'sales_cost' => (float) ($effectiveSalesCost ?? 0) * max($durationMonths, 1),
+                            'hard_cost_ip' => (float) ($hardCost ?? 0) * max($durationMonths, 1),
+                            'months' => max($durationMonths, 1),
+                            'meta' => ['source' => 'spark', 'order_id' => $sparkOrder->id],
+                        ]);
+                    }
 
                     IpAssignmentLog::create([
                         'proxy_ip_id' => $proxyIp->id,
@@ -707,18 +737,33 @@ class SparkProvisionService
         }
 
         if ($plan->type === 'ny' && $plan->device_group_id) {
-            $this->attachForwards($subscriptionIds, [
-                'device_group_id' => $plan->device_group_id,
-                'speed_limit_mbps' => $plan->speed_limit_mbps ?: null,
-                // 优先用客户实付的单月费（特价客户按实收退款），无记录时回退套餐原价
-                'forward_fee' => $feeOverride !== null ? $feeOverride : (float) $plan->base_price,
-            ]);
-            // 补充 forward_plan_id 到创建的 ForwardRule
-            \App\Models\ForwardRule::whereIn('subscription_id', $subscriptionIds)
-                ->update([
-                    'forward_plan_id' => $plan->id,
-                    'traffic_limit_bytes' => $plan->included_traffic_gb * 1073741824,
-                ]);
+            // 异步挂转发：同步创建每条需多次 NY API 往返（~7.5秒/条），批量购买会拖垮
+            // 结账请求（前端 20 秒即超时报"服务器连接失败"，但后端实际会完成，误导客户）。
+            // 只建 pending 规则 + 派发队列任务，事务提交后由 worker 逐条挂载。
+            // price 不会重复加：AttachForwardJob 会识别订单已含中转费（forward_plan_id 判据）
+            $deviceGroup = \App\Models\NyDeviceGroup::find($plan->device_group_id);
+            if (!$deviceGroup || !$deviceGroup->is_enabled) {
+                Log::warning('attachForwardByPlan: device group invalid', ['plan_id' => $plan->id]);
+                return;
+            }
+            $fee = $feeOverride !== null ? $feeOverride : (float) $plan->base_price;
+            $svc = app(\App\Services\Ny\NyForwardService::class);
+            foreach ($subscriptionIds as $subId) {
+                $sub = Subscription::find($subId);
+                if (!$sub) continue;
+                try {
+                    $rule = $svc->createPendingRule($sub, $deviceGroup, $plan->speed_limit_mbps ?: null, $fee);
+                    $rule->update([
+                        'forward_plan_id' => $plan->id,
+                        'traffic_limit_bytes' => $plan->included_traffic_gb * 1073741824,
+                    ]);
+                    \App\Jobs\AttachForwardJob::dispatch($rule->id)->afterCommit();
+                } catch (\Throwable $e) {
+                    Log::error('attachForwardByPlan: create pending rule failed', [
+                        'subscription_id' => $subId, 'error' => $e->getMessage(),
+                    ]);
+                }
+            }
         } elseif ($plan->type === 'xui' && $plan->panel_id) {
             // 获取 IP IDs
             $proxyIpIds = Subscription::whereIn('id', $subscriptionIds)->pluck('proxy_ip_id')->toArray();

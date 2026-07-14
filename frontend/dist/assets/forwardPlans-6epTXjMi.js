@@ -1,1 +1,0 @@
-import{z as a}from"./index-DWyamWS5.js";function e(){return a.get("/forward-plans")}function o(r){return a.post("/forward-plans",r)}function d(r,n){return a.put(`/forward-plans/${r}`,n)}function s(r){return a.delete(`/forward-plans/${r}`)}export{o as c,s as d,e as g,d as u};

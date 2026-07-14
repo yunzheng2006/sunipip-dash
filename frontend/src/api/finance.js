@@ -32,6 +32,10 @@ export function getSalesStatsNew(params) {
   return request.get('/sales-stats-new', { params })
 }
 
+export function getSalesStatsCustomerDetail(params) {
+  return request.get('/sales-stats-new/customer-detail', { params })
+}
+
 export function getManualStatEntries(params) {
   return request.get('/sales-stats-new/manual-entries', { params })
 }

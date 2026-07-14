@@ -355,7 +355,8 @@ Route::prefix('v1')->middleware(['auth:sanctum', 'ability:admin', 'log.activity'
     Route::post('proxy-ips/batch-remove-test-pool', [ProxyIpController::class, 'batchRemoveFromTestPool'])->middleware('perm:ip.edit');
     Route::post('proxy-ips/test-pool-assign', [ProxyIpController::class, 'testPoolAssign'])->middleware('perm:ip.assign');
     Route::post('proxy-ips/test-pool-unassign', [ProxyIpController::class, 'testPoolUnassign'])->middleware('perm:ip.assign');
-    Route::get('proxy-ips/{proxy_ip}', [ProxyIpController::class, 'show'])->middleware('perm:ip.view');
+    // withTrashed: 已回收/软删除的 IP 详情仍可查看（否则 404，前端误报"网络连接失败"）
+    Route::get('proxy-ips/{proxy_ip}', [ProxyIpController::class, 'show'])->middleware('perm:ip.view')->withTrashed();
     Route::put('proxy-ips/{proxy_ip}', [ProxyIpController::class, 'update'])->middleware('perm:ip.edit');
     Route::delete('proxy-ips/{proxy_ip}', [ProxyIpController::class, 'destroy'])->middleware('perm:ip.delete');
     Route::post('proxy-ips/{proxy_ip}/assign', [ProxyIpController::class, 'assign'])->middleware('perm:ip.assign');
@@ -716,6 +717,7 @@ Route::prefix('v1')->middleware(['auth:sanctum', 'ability:admin', 'log.activity'
 
     // 业绩统计（新版）
     Route::get('sales-stats-new', [SalesStatsNewController::class, 'index'])->middleware('perm:customer.view');
+    Route::get('sales-stats-new/customer-detail', [SalesStatsNewController::class, 'customerDetail'])->middleware('perm:customer.view');
     Route::get('sales-stats-new/manual-entries', [SalesStatsNewController::class, 'manualEntries'])->middleware('perm:performance.view');
     Route::post('sales-stats-new/manual-entries', [SalesStatsNewController::class, 'storeManualEntry'])->middleware('perm:performance.manage');
     Route::delete('sales-stats-new/manual-entries/{manualStatEntry}', [SalesStatsNewController::class, 'destroyManualEntry'])->middleware('perm:performance.manage');

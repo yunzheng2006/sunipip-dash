@@ -283,6 +283,21 @@ for radio in $RADIOS; do
     # 802.11w 保护管理帧 (可选但推荐)
     uci set "wireless.${IFACE}.ieee80211w=1"
 
+    # ath11k PTK rekey bug workaround:
+    # 1) wpa_group_rekey=0: 禁用组密钥轮换，消除 GTK 触发的 rekey
+    # 2) eap_reauth_period=0: 禁用定时 EAP 重认证 (hostapd 默认 3600s，
+    #    是每小时强制 PTK 替换/断线的根源)
+    # 3) wpa_deny_ptk0_rekey=2: rekey 仍被触发时主动断开客户端让其干净重连
+    # 4) disable_pmksa_caching=0 + okc=1: 启用 PMKSA/OKC 缓存，
+    #    客户端重连/漫游时使用缓存密钥，避免触发 PTK 替换
+    # 5) disassoc_low_ack=0: 不因丢 ACK 踢弱信号客户端
+    uci set "wireless.${IFACE}.wpa_group_rekey=0"
+    uci set "wireless.${IFACE}.disassoc_low_ack=0"
+    uci add_list "wireless.${IFACE}.hostapd_bss_options=eap_reauth_period=0"
+    uci add_list "wireless.${IFACE}.hostapd_bss_options=wpa_deny_ptk0_rekey=2"
+    uci add_list "wireless.${IFACE}.hostapd_bss_options=disable_pmksa_caching=0"
+    uci add_list "wireless.${IFACE}.hostapd_bss_options=okc=1"
+
     ok "${radio}: WPA2-Enterprise (Flat IP) 已配置"
 done
 

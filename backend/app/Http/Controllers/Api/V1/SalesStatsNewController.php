@@ -262,7 +262,8 @@ class SalesStatsNewController extends Controller
             $forwardRows = DB::table('forward_rules')
                 ->join('subscriptions', 'forward_rules.subscription_id', '=', 'subscriptions.id')
                 ->whereIn('subscriptions.id', $activeSubIds)
-                ->where('forward_rules.status', 'active')
+                // deleted 也算：IP 到期清理会把规则标 deleted，否则历史月份"带中转IP数"会缩水
+                ->whereIn('forward_rules.status', ['active', 'deleted'])
                 ->select('subscriptions.customer_id', DB::raw('COUNT(DISTINCT subscriptions.id) as cnt'))
                 ->groupBy('subscriptions.customer_id')
                 ->get();
@@ -380,16 +381,26 @@ class SalesStatsNewController extends Controller
             ELSE 30
         END)";
         $initialEndExpr = "DATE_ADD(subscriptions.started_at, INTERVAL {$initialDaysExpr} DAY)";
-        $fwdMonthsExpr = "GREATEST(DATEDIFF({$initialEndExpr}, GREATEST(forward_rules.created_at, subscriptions.started_at)) / 30.0, 0.1)";
+        // 中转计费终点：active 规则按首期到期日；deleted 规则（到期清理/降级）按删除时间封顶——
+        // 到期后被清理的规则删除时间晚于首期到期日，成本不受影响；中途降级的按实际使用折算。
+        // 不能只查 active：IP 到期清理会把规则标 deleted，历史月份的中转成本会凭空消失
+        $fwdEndExpr = "CASE WHEN forward_rules.status = 'deleted'
+            THEN LEAST({$initialEndExpr}, forward_rules.updated_at)
+            ELSE {$initialEndExpr} END";
+        $fwdMonthsExpr = "GREATEST(DATEDIFF({$fwdEndExpr}, GREATEST(forward_rules.created_at, subscriptions.started_at)) / 30.0, 0.1)";
         $newFwdCostRows = DB::table('forward_rules')
             ->join('subscriptions', 'forward_rules.subscription_id', '=', 'subscriptions.id')
             ->leftJoin('forward_plans', 'forward_rules.forward_plan_id', '=', 'forward_plans.id')
             ->where(fn($q) => $costCustWhereIn($q, $customerIds))
             ->where('subscriptions.is_test', false)
-            ->where('forward_rules.status', 'active')
+            ->whereIn('forward_rules.status', ['active', 'deleted'])
             ->where(fn($q) => $costSubFilterJoined($q))
             ->where('subscriptions.started_at', '>=', $periodStart)
             ->where('subscriptions.started_at', '<=', $periodEnd)
+            // 规则必须在时段结束前已存在：订阅在本期开通但后来（时段外）换开的
+            // 新中转，其成本不能倒灌进本期（真实案例：老八 7/13 升级手机直播专线，
+            // 成本 ¥234 被算进 7/11~7/12 的报表，只有成本没有消费，利润 -257）
+            ->where('forward_rules.created_at', '<=', $periodEnd)
             ->select(DB::raw("{$costCustExpr} as customer_id"), DB::raw("SUM(COALESCE(forward_plans.cost_price, 0) * {$fwdMonthsExpr}) as fwd_cost"))
             ->groupBy(DB::raw($costCustExpr))
             ->get();
@@ -405,12 +416,13 @@ class SalesStatsNewController extends Controller
                 ->where(fn($q) => $costCustWhereIn($q, $customerIds))
                 ->whereIn('subscriptions.id', $convertSubIds)
                 ->where('subscriptions.is_test', false)
-                ->where('forward_rules.status', 'active')
+                ->whereIn('forward_rules.status', ['active', 'deleted'])
                 ->where(fn($q) => $costSubFilterJoined($q))
                 ->whereNot(function ($q) use ($periodStart, $periodEnd) {
                     $q->where('subscriptions.started_at', '>=', $periodStart)
                       ->where('subscriptions.started_at', '<=', $periodEnd);
                 })
+                ->where('forward_rules.created_at', '<=', $periodEnd)
                 ->select(DB::raw("{$costCustExpr} as customer_id"), DB::raw("SUM(COALESCE(forward_plans.cost_price, 0) * {$fwdMonthsExpr}) as fwd_cost"))
                 ->groupBy(DB::raw($costCustExpr))
                 ->get();
@@ -458,9 +470,15 @@ class SalesStatsNewController extends Controller
             })
             ->join('forward_rules', function ($join) {
                 $join->on('forward_rules.subscription_id', '=', 'subscriptions.id')
-                    ->where('forward_rules.status', 'active')
-                    // 中转规则须在续费之前已存在，否则该笔续费款不含中转费（升级成本由 4e 覆盖）
-                    ->whereColumn('forward_rules.created_at', '<=', 'transactions.created_at');
+                    // 规则须在续费前已存在；deleted 规则仅当删除发生在续费之后才算（续费时中转还在）
+                    ->whereColumn('forward_rules.created_at', '<=', 'transactions.created_at')
+                    ->where(function ($q) {
+                        $q->where('forward_rules.status', 'active')
+                          ->orWhere(function ($q2) {
+                              $q2->where('forward_rules.status', 'deleted')
+                                 ->whereColumn('forward_rules.updated_at', '>', 'transactions.created_at');
+                          });
+                    });
             })
             ->leftJoin('forward_plans', 'forward_rules.forward_plan_id', '=', 'forward_plans.id')
             ->whereIn('transactions.customer_id', $customerIds)
@@ -505,7 +523,7 @@ class SalesStatsNewController extends Controller
             ->leftJoin('forward_plans', 'forward_rules.forward_plan_id', '=', 'forward_plans.id')
             ->where(fn($q) => $costCustWhereIn($q, $customerIds))
             ->where('subscriptions.is_test', false)
-            ->where('forward_rules.status', 'active')
+            ->whereIn('forward_rules.status', ['active', 'deleted'])
             ->where(fn($q) => $costSubFilterJoined($q))
             ->where('forward_rules.created_at', '>=', $periodStart)
             ->where('forward_rules.created_at', '<=', $periodEnd)
@@ -745,10 +763,12 @@ class SalesStatsNewController extends Controller
             ->leftJoin('forward_plans', 'forward_rules.forward_plan_id', '=', 'forward_plans.id')
             ->where(fn($q) => $costCustWhereIn($q, $customerIds))
             ->where('subscriptions.is_test', false)
-            ->where('forward_rules.status', 'active')
+            ->whereIn('forward_rules.status', ['active', 'deleted'])
             ->where(fn($q) => $costSubFilterJoined($q))
             ->where('subscriptions.started_at', '>=', $periodStart)
             ->where('subscriptions.started_at', '<=', $periodEnd)
+            // 同 4b：时段外新换开的中转成本不倒灌本期
+            ->where('forward_rules.created_at', '<=', $periodEnd)
             ->select(DB::raw("{$costCustExpr} as customer_id"), DB::raw("SUM({$fwdHardExpr} * {$fwdMonthsExpr}) as fwd_cost"))
             ->groupBy(DB::raw($costCustExpr))
             ->get();
@@ -764,12 +784,13 @@ class SalesStatsNewController extends Controller
                 ->where(fn($q) => $costCustWhereIn($q, $customerIds))
                 ->whereIn('subscriptions.id', $convertSubIds)
                 ->where('subscriptions.is_test', false)
-                ->where('forward_rules.status', 'active')
+                ->whereIn('forward_rules.status', ['active', 'deleted'])
                 ->where(fn($q) => $costSubFilterJoined($q))
                 ->whereNot(function ($q) use ($periodStart, $periodEnd) {
                     $q->where('subscriptions.started_at', '>=', $periodStart)
                       ->where('subscriptions.started_at', '<=', $periodEnd);
                 })
+                ->where('forward_rules.created_at', '<=', $periodEnd)
                 ->select(DB::raw("{$costCustExpr} as customer_id"), DB::raw("SUM({$fwdHardExpr} * {$fwdMonthsExpr}) as fwd_cost"))
                 ->groupBy(DB::raw($costCustExpr))
                 ->get();
@@ -786,9 +807,15 @@ class SalesStatsNewController extends Controller
             })
             ->join('forward_rules', function ($join) {
                 $join->on('forward_rules.subscription_id', '=', 'subscriptions.id')
-                    ->where('forward_rules.status', 'active')
-                    // 中转规则须在续费之前已存在（同 4d）
-                    ->whereColumn('forward_rules.created_at', '<=', 'transactions.created_at');
+                    // 同 4d：规则须先于续费存在；deleted 仅当删除晚于续费才算
+                    ->whereColumn('forward_rules.created_at', '<=', 'transactions.created_at')
+                    ->where(function ($q) {
+                        $q->where('forward_rules.status', 'active')
+                          ->orWhere(function ($q2) {
+                              $q2->where('forward_rules.status', 'deleted')
+                                 ->whereColumn('forward_rules.updated_at', '>', 'transactions.created_at');
+                          });
+                    });
             })
             ->leftJoin('forward_plans', 'forward_rules.forward_plan_id', '=', 'forward_plans.id')
             ->whereIn('transactions.customer_id', $customerIds)
@@ -820,7 +847,7 @@ class SalesStatsNewController extends Controller
             ->leftJoin('forward_plans', 'forward_rules.forward_plan_id', '=', 'forward_plans.id')
             ->where(fn($q) => $costCustWhereIn($q, $customerIds))
             ->where('subscriptions.is_test', false)
-            ->where('forward_rules.status', 'active')
+            ->whereIn('forward_rules.status', ['active', 'deleted'])
             ->where(fn($q) => $costSubFilterJoined($q))
             ->where('forward_rules.created_at', '>=', $periodStart)
             ->where('forward_rules.created_at', '<=', $periodEnd)
@@ -910,6 +937,428 @@ class SalesStatsNewController extends Controller
     }
 
     // ── 手动条目 CRUD ──
+
+    /**
+     * GET /billing/sales-stats-new/customer-detail
+     * 单客户业绩/成本逐行明细（业绩页点击客户名弹窗用），与 index() 各汇总项同口径：
+     *   transactions（消费/退款）、new_subs（新开IP成本 4a/6a + 测试转正）、
+     *   new_fwd_rules（新开中转 4b/6c）、renewals（续费 4c/4d）、
+     *   upgrade_fwd_rules（升级中转 4e）、commissions（返佣 4f）、manual_entries（手动 5）
+     */
+    public function customerDetail(Request $request): JsonResponse
+    {
+        $data = $request->validate([
+            'customer_id' => 'required|integer|exists:customers,id',
+            'date_from' => 'required|date',
+            'date_to' => 'required|date',
+        ]);
+        $cid = (int) $data['customer_id'];
+        $periodStart = \Illuminate\Support\Carbon::parse($data['date_from'])->startOfDay();
+        $periodEnd = \Illuminate\Support\Carbon::parse($data['date_to'])->endOfDay();
+
+        $customer = DB::table('customers')->where('id', $cid)
+            ->first(['id', 'customer_name', 'sales_person', 'balance']);
+
+        // ── 口径表达式（与 index() 一致） ──
+        $monthsExpr = self::durationToMonthsExpr('subscriptions.duration', 'subscriptions.unit');
+        $initialMonthsExpr = self::durationToMonthsExpr(
+            'COALESCE(subscriptions.initial_duration, subscriptions.duration)',
+            'COALESCE(subscriptions.initial_unit, subscriptions.unit)'
+        );
+        $initialDaysExpr = "(COALESCE(subscriptions.initial_duration, subscriptions.duration) * CASE COALESCE(subscriptions.initial_unit, subscriptions.unit)
+            WHEN 1 THEN 1 WHEN 2 THEN 7 WHEN 3 THEN 30 WHEN 4 THEN 365 ELSE 30 END)";
+        $initialEndExpr = "DATE_ADD(subscriptions.started_at, INTERVAL {$initialDaysExpr} DAY)";
+        $fwdEndExpr = "CASE WHEN forward_rules.status = 'deleted'
+            THEN LEAST({$initialEndExpr}, forward_rules.updated_at)
+            ELSE {$initialEndExpr} END";
+        $fwdMonthsExpr = "GREATEST(DATEDIFF({$fwdEndExpr}, GREATEST(forward_rules.created_at, subscriptions.started_at)) / 30.0, 0.1)";
+        $upgradeFwdMonthsExpr = "COALESCE(
+            (SELECT SUM(ABS(t.amount)) FROM transactions t
+             WHERE t.related_id = subscriptions.id
+               AND t.related_type = 'App\\\\Models\\\\Subscription'
+               AND t.type = 'deduction' AND t.amount < 0
+               AND t.created_at >= forward_rules.created_at - INTERVAL 10 MINUTE
+               AND t.created_at <= forward_rules.created_at + INTERVAL 10 MINUTE
+            ) / NULLIF(forward_rules.forward_fee, 0),
+            GREATEST(DATEDIFF(subscriptions.expires_at, forward_rules.created_at) / 30.0, 0.1)
+        )";
+        $costCustWhere = function ($q) use ($cid) {
+            $q->where(function ($q2) use ($cid) {
+                $q2->where('subscriptions.customer_id', $cid)
+                   ->orWhere('subscriptions.transferred_from_customer_id', $cid);
+            });
+        };
+        $extraDeductedSubIds = DB::table('subscriptions as s')
+            ->where(function ($q) use ($cid) {
+                $q->where('s.customer_id', $cid)->orWhere('s.transferred_from_customer_id', $cid);
+            })
+            ->where('s.balance_deducted', false)
+            ->where('s.is_test', false)
+            ->whereExists(function ($q) {
+                $q->select(DB::raw(1))->from('transactions as t')
+                  ->whereColumn('t.related_id', 's.id')
+                  ->where('t.related_type', 'like', '%Subscription')
+                  ->whereIn('t.type', ['purchase', 'deduction', 'renew'])
+                  ->where('t.amount', '<', 0);
+            })
+            ->pluck('s.id')->all();
+        $costSubFilterJoined = function ($q) use ($extraDeductedSubIds) {
+            $q->where(function ($q2) use ($extraDeductedSubIds) {
+                $q2->where('subscriptions.balance_deducted', true);
+                if (!empty($extraDeductedSubIds)) {
+                    $q2->orWhereIn('subscriptions.id', $extraDeductedSubIds);
+                }
+            })->where(function ($q2) {
+                $q2->where('subscriptions.status', '!=', 'refunded')
+                   ->orWhere('subscriptions.keep_performance', true);
+            });
+        };
+
+        // ── 1. 交易流水（全部列出，标注每笔对"消费"的贡献） ──
+        $txnRows = DB::table('transactions as t')
+            ->leftJoin('subscriptions as s', function ($join) {
+                $join->on('t.related_id', '=', 's.id')
+                    ->where('t.related_type', 'App\\Models\\Subscription');
+            })
+            ->where('t.customer_id', $cid)
+            ->whereBetween('t.created_at', [$periodStart, $periodEnd])
+            ->orderBy('t.id')
+            ->get(['t.id', 't.type', 't.amount', 't.balance_after', 't.description', 't.created_at',
+                   's.id as sub_id', 's.status as sub_status', 's.keep_performance']);
+        $transactions = $txnRows->map(function ($t) {
+            $subOk = !$t->sub_id || $t->sub_status !== 'refunded' || $t->keep_performance;
+            $effect = 0.0;
+            if ((float) $t->amount < 0 && !in_array($t->type, Transaction::SPENDING_EXCLUDE_TYPES) && $subOk) {
+                $effect = abs((float) $t->amount); // 计入消费
+            } elseif (in_array($t->type, [Transaction::TYPE_REFUND, Transaction::TYPE_GATEWAY_REFUND])
+                && (float) $t->amount > 0 && $subOk) {
+                $effect = -(float) $t->amount; // 退款冲减消费
+            }
+            return [
+                'id' => $t->id, 'type' => $t->type, 'amount' => (float) $t->amount,
+                'balance_after' => (float) $t->balance_after, 'description' => $t->description,
+                'created_at' => (string) $t->created_at, 'sub_id' => $t->sub_id,
+                'spending_effect' => round($effect, 2),
+            ];
+        })->values();
+
+        // ── 转正订阅 ID（1a+ 同口径） ──
+        $convertSubIds = DB::table('transactions')
+            ->join('subscriptions', function ($join) {
+                $join->on('transactions.related_id', '=', 'subscriptions.id')
+                    ->where('transactions.related_type', 'App\\Models\\Subscription');
+            })
+            ->where('transactions.customer_id', $cid)
+            ->where('transactions.type', Transaction::TYPE_DEDUCTION)
+            ->where('transactions.description', 'like', '测试转正%')
+            ->where('transactions.amount', '<', 0)
+            ->whereBetween('transactions.created_at', [$periodStart, $periodEnd])
+            ->where('subscriptions.is_test', false)
+            ->where(fn($q) => $costSubFilterJoined($q))
+            ->pluck('subscriptions.id');
+
+        // ── 2. 新开订阅 IP 成本（4a/6a + 转正 6a+） ──
+        $newSubRows = DB::table('subscriptions')
+            ->leftJoin('proxy_ips', 'proxy_ips.id', '=', 'subscriptions.proxy_ip_id')
+            ->where(fn($q) => $costCustWhere($q))
+            ->where('subscriptions.is_test', false)
+            ->where(fn($q) => $costSubFilterJoined($q))
+            ->where(function ($q) use ($periodStart, $periodEnd, $convertSubIds) {
+                $q->whereBetween('subscriptions.started_at', [$periodStart, $periodEnd]);
+                if ($convertSubIds->isNotEmpty()) {
+                    $q->orWhereIn('subscriptions.id', $convertSubIds);
+                }
+            })
+            ->select('subscriptions.id', 'proxy_ips.ip_address', 'subscriptions.started_at',
+                'subscriptions.price', 'subscriptions.status',
+                DB::raw("COALESCE(subscriptions.sales_cost, 0) as sales_cost_m"),
+                'subscriptions.hard_cost', 'subscriptions.proxy_ip_id',
+                DB::raw("{$initialMonthsExpr} as months"))
+            ->get();
+
+        // IP 硬成本解析（同 index() 的 resolveIpHardCost 简化版）
+        $ipHardResolver = $this->buildIpHardCostResolver($newSubRows->pluck('proxy_ip_id')->filter()->all());
+
+        $isConvert = $convertSubIds->flip();
+        $newSubs = $newSubRows->map(function ($s) use ($ipHardResolver, $isConvert) {
+            $hardM = $ipHardResolver($s);
+            return [
+                'sub_id' => $s->id, 'ip' => $s->ip_address, 'started_at' => (string) $s->started_at,
+                'status' => $s->status, 'price' => (float) $s->price,
+                'months' => (float) $s->months, 'is_convert' => isset($isConvert[$s->id]),
+                'sales_cost_m' => (float) $s->sales_cost_m, 'hard_cost_m' => $hardM,
+                'sales_subtotal' => round((float) $s->sales_cost_m * (float) $s->months, 2),
+                'hard_subtotal' => round($hardM * (float) $s->months, 2),
+            ];
+        })->values();
+
+        // ── 3. 新开/转正订阅的中转成本（4b/6c + 4b+/6c+） ──
+        $newFwdRows = DB::table('forward_rules')
+            ->join('subscriptions', 'forward_rules.subscription_id', '=', 'subscriptions.id')
+            ->leftJoin('proxy_ips', 'proxy_ips.id', '=', 'subscriptions.proxy_ip_id')
+            ->leftJoin('forward_plans', 'forward_rules.forward_plan_id', '=', 'forward_plans.id')
+            ->where(fn($q) => $costCustWhere($q))
+            ->where('subscriptions.is_test', false)
+            ->whereIn('forward_rules.status', ['active', 'deleted'])
+            ->where(fn($q) => $costSubFilterJoined($q))
+            ->where(function ($q) use ($periodStart, $periodEnd, $convertSubIds) {
+                $q->whereBetween('subscriptions.started_at', [$periodStart, $periodEnd]);
+                if ($convertSubIds->isNotEmpty()) {
+                    $q->orWhereIn('subscriptions.id', $convertSubIds);
+                }
+            })
+            ->where('forward_rules.created_at', '<=', $periodEnd)
+            ->select('forward_rules.id as rule_id', 'subscriptions.id as sub_id', 'proxy_ips.ip_address',
+                'forward_plans.name as plan_name', 'forward_rules.status', 'forward_rules.forward_fee',
+                'forward_rules.created_at', 'forward_rules.updated_at',
+                DB::raw("COALESCE(forward_plans.cost_price, 0) as cost_m"),
+                DB::raw("COALESCE(forward_plans.hard_cost_price, forward_plans.cost_price, 0) as hard_m"),
+                DB::raw("ROUND({$fwdMonthsExpr}, 4) as months"))
+            ->get();
+        $newFwdRules = $newFwdRows->map(fn($r) => [
+            'rule_id' => $r->rule_id, 'sub_id' => $r->sub_id, 'ip' => $r->ip_address,
+            'plan' => $r->plan_name, 'status' => $r->status, 'fee' => (float) $r->forward_fee,
+            'created_at' => (string) $r->created_at,
+            'deleted_at' => $r->status === 'deleted' ? (string) $r->updated_at : null,
+            'months' => (float) $r->months,
+            'cost_m' => (float) $r->cost_m, 'hard_m' => (float) $r->hard_m,
+            'sales_subtotal' => round((float) $r->cost_m * (float) $r->months, 2),
+            'hard_subtotal' => round((float) $r->hard_m * (float) $r->months, 2),
+        ])->values();
+
+        // ── 4. 续费成本（4c IP + 4d 中转，按订阅聚合） ──
+        $renewIpRows = DB::table('transactions')
+            ->join('subscriptions', function ($join) {
+                $join->on('transactions.related_id', '=', 'subscriptions.id')
+                    ->where('transactions.related_type', 'App\\Models\\Subscription');
+            })
+            ->leftJoin('proxy_ips', 'proxy_ips.id', '=', 'subscriptions.proxy_ip_id')
+            ->where('transactions.customer_id', $cid)
+            ->where('transactions.type', Transaction::TYPE_RENEW)
+            ->where('transactions.amount', '<', 0)
+            ->whereBetween('transactions.created_at', [$periodStart, $periodEnd])
+            ->where('subscriptions.is_test', false)
+            ->where(fn($q) => $costSubFilterJoined($q))
+            ->select('subscriptions.id as sub_id', 'proxy_ips.ip_address',
+                DB::raw("COALESCE(subscriptions.sales_cost, 0) as sales_cost_m"),
+                'subscriptions.hard_cost', 'subscriptions.proxy_ip_id',
+                DB::raw('ABS(SUM(transactions.amount)) as txn_total'),
+                DB::raw("GREATEST(ROUND(ABS(SUM(transactions.amount)) * {$monthsExpr} / NULLIF(subscriptions.price, 0)), 1) as renew_months"))
+            ->groupBy('subscriptions.id', 'proxy_ips.ip_address', 'subscriptions.sales_cost',
+                'subscriptions.hard_cost', 'subscriptions.proxy_ip_id',
+                'subscriptions.duration', 'subscriptions.unit', 'subscriptions.price')
+            ->get();
+
+        // 续费时挂着的中转（4d 条件：规则先于续费存在，deleted 须晚于续费删除）
+        $renewFwdMap = [];
+        if ($renewIpRows->isNotEmpty()) {
+            $renewFwdRows = DB::table('transactions')
+                ->join('subscriptions', function ($join) {
+                    $join->on('transactions.related_id', '=', 'subscriptions.id')
+                        ->where('transactions.related_type', 'App\\Models\\Subscription');
+                })
+                ->join('forward_rules', function ($join) {
+                    $join->on('forward_rules.subscription_id', '=', 'subscriptions.id')
+                        ->whereColumn('forward_rules.created_at', '<=', 'transactions.created_at')
+                        ->where(function ($q) {
+                            $q->where('forward_rules.status', 'active')
+                              ->orWhere(function ($q2) {
+                                  $q2->where('forward_rules.status', 'deleted')
+                                     ->whereColumn('forward_rules.updated_at', '>', 'transactions.created_at');
+                              });
+                        });
+                })
+                ->leftJoin('forward_plans', 'forward_rules.forward_plan_id', '=', 'forward_plans.id')
+                ->where('transactions.customer_id', $cid)
+                ->where('transactions.type', Transaction::TYPE_RENEW)
+                ->where('transactions.amount', '<', 0)
+                ->whereBetween('transactions.created_at', [$periodStart, $periodEnd])
+                ->where('subscriptions.is_test', false)
+                ->where(fn($q) => $costSubFilterJoined($q))
+                ->select('subscriptions.id as sub_id', 'forward_plans.name as plan_name',
+                    DB::raw("COALESCE(forward_plans.cost_price, 0) as cost_m"),
+                    DB::raw("COALESCE(forward_plans.hard_cost_price, forward_plans.cost_price, 0) as hard_m"))
+                ->groupBy('subscriptions.id', 'forward_plans.name', 'forward_plans.cost_price', 'forward_plans.hard_cost_price')
+                ->get();
+            foreach ($renewFwdRows as $r) {
+                $renewFwdMap[$r->sub_id] = $r;
+            }
+        }
+
+        $renewHardResolver = $this->buildIpHardCostResolver($renewIpRows->pluck('proxy_ip_id')->filter()->all());
+        $renewals = $renewIpRows->map(function ($s) use ($renewFwdMap, $renewHardResolver) {
+            $fwd = $renewFwdMap[$s->sub_id] ?? null;
+            $hardM = $renewHardResolver($s);
+            $months = (int) $s->renew_months;
+            return [
+                'sub_id' => $s->sub_id, 'ip' => $s->ip_address,
+                'txn_total' => (float) $s->txn_total, 'renew_months' => $months,
+                'ip_sales_cost_m' => (float) $s->sales_cost_m, 'ip_hard_cost_m' => $hardM,
+                'ip_sales_subtotal' => round((float) $s->sales_cost_m * $months, 2),
+                'ip_hard_subtotal' => round($hardM * $months, 2),
+                'fwd_plan' => $fwd->plan_name ?? null,
+                'fwd_cost_m' => $fwd ? (float) $fwd->cost_m : 0,
+                'fwd_hard_m' => $fwd ? (float) $fwd->hard_m : 0,
+                'fwd_sales_subtotal' => $fwd ? round((float) $fwd->cost_m * $months, 2) : 0,
+                'fwd_hard_subtotal' => $fwd ? round((float) $fwd->hard_m * $months, 2) : 0,
+            ];
+        })->values();
+
+        // ── 5. 中途升级中转（4e：订阅非本期新开、规则本期创建） ──
+        $upgradeRows = DB::table('forward_rules')
+            ->join('subscriptions', 'forward_rules.subscription_id', '=', 'subscriptions.id')
+            ->leftJoin('proxy_ips', 'proxy_ips.id', '=', 'subscriptions.proxy_ip_id')
+            ->leftJoin('forward_plans', 'forward_rules.forward_plan_id', '=', 'forward_plans.id')
+            ->where(fn($q) => $costCustWhere($q))
+            ->where('subscriptions.is_test', false)
+            ->whereIn('forward_rules.status', ['active', 'deleted'])
+            ->where(fn($q) => $costSubFilterJoined($q))
+            ->whereBetween('forward_rules.created_at', [$periodStart, $periodEnd])
+            ->where('subscriptions.started_at', '<', $periodStart)
+            ->select('forward_rules.id as rule_id', 'subscriptions.id as sub_id', 'proxy_ips.ip_address',
+                'forward_plans.name as plan_name', 'forward_rules.status', 'forward_rules.forward_fee',
+                'forward_rules.created_at',
+                DB::raw("COALESCE(forward_plans.cost_price, 0) as cost_m"),
+                DB::raw("COALESCE(forward_plans.hard_cost_price, forward_plans.cost_price, 0) as hard_m"),
+                DB::raw("ROUND({$upgradeFwdMonthsExpr}, 4) as months"))
+            ->get();
+        $upgradeFwdRules = $upgradeRows->map(fn($r) => [
+            'rule_id' => $r->rule_id, 'sub_id' => $r->sub_id, 'ip' => $r->ip_address,
+            'plan' => $r->plan_name, 'status' => $r->status, 'fee' => (float) $r->forward_fee,
+            'created_at' => (string) $r->created_at, 'months' => (float) $r->months,
+            'cost_m' => (float) $r->cost_m, 'hard_m' => (float) $r->hard_m,
+            'sales_subtotal' => round((float) $r->cost_m * (float) $r->months, 2),
+            'hard_subtotal' => round((float) $r->hard_m * (float) $r->months, 2),
+        ])->values();
+
+        // ── 6. 返佣（4f） ──
+        $commissions = DB::table('referral_commissions')
+            ->where('referee_id', $cid)
+            ->whereIn('status', ['pending', 'credited'])
+            ->whereBetween('created_at', [$periodStart, $periodEnd])
+            ->orderBy('id')
+            ->get(['id', 'referrer_id', 'commission_amount', 'status', 'trigger_type', 'created_at']);
+
+        // ── 7. 手动条目（5） ──
+        $manualEntries = DB::table('manual_stat_entries')
+            ->where('customer_id', $cid)
+            ->whereBetween('entry_date', [$periodStart->toDateString(), $periodEnd->toDateString()])
+            ->orderBy('entry_date')
+            ->get(['id', 'entry_date', 'spending', 'sales_cost', 'hard_cost', 'note']);
+        $oldManual = DB::table('manual_performances')
+            ->where('customer_id', $cid)
+            ->whereBetween('performance_date', [$periodStart->toDateString(), $periodEnd->toDateString()])
+            ->orderBy('performance_date')
+            ->get(['id', 'performance_date', 'amount', 'profit', 'note']);
+
+        // ── 汇总（供前端与列表行核对） ──
+        $summary = [
+            'spending' => round($transactions->sum('spending_effect')
+                + $manualEntries->sum('spending') + $oldManual->sum('amount'), 2),
+            'commission' => round($commissions->sum('commission_amount'), 2),
+            'new_ip_sales_cost' => round($newSubs->sum('sales_subtotal'), 2),
+            'new_ip_hard_cost' => round($newSubs->sum('hard_subtotal'), 2),
+            'new_fwd_sales_cost' => round($newFwdRules->sum('sales_subtotal'), 2),
+            'new_fwd_hard_cost' => round($newFwdRules->sum('hard_subtotal'), 2),
+            'renew_ip_sales_cost' => round($renewals->sum('ip_sales_subtotal'), 2),
+            'renew_ip_hard_cost' => round($renewals->sum('ip_hard_subtotal'), 2),
+            'renew_fwd_sales_cost' => round($renewals->sum('fwd_sales_subtotal'), 2),
+            'renew_fwd_hard_cost' => round($renewals->sum('fwd_hard_subtotal'), 2),
+            'upgrade_fwd_sales_cost' => round($upgradeFwdRules->sum('sales_subtotal'), 2),
+            'upgrade_fwd_hard_cost' => round($upgradeFwdRules->sum('hard_subtotal'), 2),
+            'manual_spending' => round($manualEntries->sum('spending') + $oldManual->sum('amount'), 2),
+            'manual_cost' => round($manualEntries->sum('sales_cost')
+                + ($oldManual->sum('amount') - $oldManual->sum('profit')), 2),
+            'manual_hard_cost' => round($manualEntries->sum('hard_cost'), 2),
+        ];
+
+        return $this->success([
+            'customer' => $customer,
+            'period' => ['start' => $periodStart->toDateString(), 'end' => $periodEnd->toDateString()],
+            'transactions' => $transactions,
+            'new_subs' => $newSubs,
+            'new_fwd_rules' => $newFwdRules,
+            'renewals' => $renewals,
+            'upgrade_fwd_rules' => $upgradeFwdRules,
+            'commissions' => $commissions,
+            'manual_entries' => $manualEntries,
+            'old_manual_entries' => $oldManual,
+            'summary' => $summary,
+        ]);
+    }
+
+    /**
+     * 构建 IP 硬成本解析闭包（index() 内 resolveIpHardCost 的可复用版）：
+     * 优先 subscriptions.hard_cost，其次上游产品目录 cost_price，最后回退 sales_cost
+     */
+    private function buildIpHardCostResolver(array $proxyIpIds): \Closure
+    {
+        $sparkCosts = [];
+        try {
+            foreach (\App\Services\SparkStockCacheService::allProducts() as $p) {
+                if (isset($p['product_id'], $p['cost_price']) && (float) $p['cost_price'] > 0) {
+                    $sparkCosts[$p['product_id']] = (float) $p['cost_price'];
+                }
+            }
+            foreach (\App\Services\SparkStockCacheService::everStockedProducts() as $pid => $p) {
+                if (!isset($sparkCosts[$pid]) && isset($p['cost_price']) && (float) $p['cost_price'] > 0) {
+                    $sparkCosts[$pid] = (float) $p['cost_price'];
+                }
+            }
+        } catch (\Throwable) {}
+        $ipipvCosts = [];
+        try {
+            foreach (\App\Services\IpipvStockCacheService::products() as $p) {
+                $pno = $p['product_no'] ?? $p['productNo'] ?? null;
+                $price = $p['cost_price'] ?? $p['unitPrice'] ?? null;
+                if ($pno && $price !== null && (float) $price > 0) {
+                    $ipipvCosts[$pno] = (float) $price;
+                }
+            }
+        } catch (\Throwable) {}
+
+        $sparkProductMap = [];
+        $ipipvProductMap = [];
+        if (!empty($proxyIpIds)) {
+            foreach (DB::table('spark_instances')
+                ->join('spark_orders', 'spark_orders.id', '=', 'spark_instances.spark_order_id')
+                ->whereIn('spark_instances.proxy_ip_id', $proxyIpIds)
+                ->select('spark_instances.proxy_ip_id', 'spark_orders.product_id')->get() as $row) {
+                $sparkProductMap[$row->proxy_ip_id] = $row->product_id;
+            }
+            foreach (DB::table('proxy_ips')
+                ->join('ipipv_instances', 'ipipv_instances.instance_no', '=', 'proxy_ips.ipipv_instance_id')
+                ->join('ipipv_orders', 'ipipv_orders.id', '=', 'ipipv_instances.ipipv_order_id')
+                ->whereIn('proxy_ips.id', $proxyIpIds)
+                ->whereNotNull('proxy_ips.ipipv_instance_id')
+                ->select('proxy_ips.id as proxy_ip_id', 'ipipv_orders.product_no')->get() as $row) {
+                $ipipvProductMap[$row->proxy_ip_id] = $row->product_no;
+            }
+        }
+        $ipipvOverride = \App\Models\SystemConfig::get('cost.ipipv_hard_cost_override');
+
+        return function ($sub) use ($sparkCosts, $ipipvCosts, $sparkProductMap, $ipipvProductMap, $ipipvOverride): float {
+            if ($sub->hard_cost && (float) $sub->hard_cost > 0) {
+                return (float) $sub->hard_cost;
+            }
+            $pid = $sub->proxy_ip_id;
+            if ($pid && isset($sparkProductMap[$pid], $sparkCosts[$sparkProductMap[$pid]])) {
+                return $sparkCosts[$sparkProductMap[$pid]];
+            }
+            if ($pid && isset($ipipvProductMap[$pid])) {
+                if ($ipipvOverride !== null && (float) $ipipvOverride > 0) {
+                    return (float) $ipipvOverride;
+                }
+                if (isset($ipipvCosts[$ipipvProductMap[$pid]])) {
+                    return $ipipvCosts[$ipipvProductMap[$pid]];
+                }
+            }
+            if (isset($sub->sales_cost_m) && (float) $sub->sales_cost_m > 0) {
+                return (float) $sub->sales_cost_m;
+            }
+            return 0;
+        };
+    }
 
     public function manualEntries(Request $request): JsonResponse
     {

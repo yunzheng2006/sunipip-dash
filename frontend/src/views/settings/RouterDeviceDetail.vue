@@ -463,7 +463,7 @@
         </ol>
         <el-alert type="info" :closable="false" style="margin-top: 8px">
           <template #title>
-            <span style="font-weight: normal">安装完成后，管理页面: <b>http://172.10.0.1</b> · 有线LAN: <b>http://192.168.1.1</b></span>
+            <span style="font-weight: normal">安装完成后，管理页面: <b>http://172.10.0.1</b> · 有线LAN: <b>http://100.64.1.1</b></span>
           </template>
         </el-alert>
       </div>
@@ -774,6 +774,13 @@ for radio in radio0 radio1 radio2 radio3; do
     uci set "wireless.\${IFACE}.auth_secret=\${RADIUS_SECRET}"
     uci set "wireless.\${IFACE}.dynamic_vlan=0"
     uci set "wireless.\${IFACE}.ieee80211w=1"
+    # ath11k PTK rekey bug workaround
+    uci set "wireless.\${IFACE}.wpa_group_rekey=0"
+    uci set "wireless.\${IFACE}.disassoc_low_ack=0"
+    uci add_list "wireless.\${IFACE}.hostapd_bss_options=eap_reauth_period=0"
+    uci add_list "wireless.\${IFACE}.hostapd_bss_options=wpa_deny_ptk0_rekey=2"
+    uci add_list "wireless.\${IFACE}.hostapd_bss_options=disable_pmksa_caching=0"
+    uci add_list "wireless.\${IFACE}.hostapd_bss_options=okc=1"
     ok "\${radio}: WPA2-Enterprise → wan (br-trunk)"
 done
 

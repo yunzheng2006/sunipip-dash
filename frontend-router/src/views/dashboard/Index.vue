@@ -78,7 +78,7 @@
             </div>
             <div class="stat-item">
               <span class="stat-label">LAN 接口</span>
-              <span class="stat-value mono">192.168.1.1</span>
+              <span class="stat-value mono">100.64.1.1</span>
             </div>
           </div>
         </el-card>

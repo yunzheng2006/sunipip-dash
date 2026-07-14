@@ -1,0 +1,1 @@
+import{l as e}from"./index-CWdL2rEb.js";function n(){return e.get("/status")}function s(){return e.get("/network")}function c(){return e.get("/services")}function o(){return e.get("/connected-devices")}function i(t){return e.post("/restart-service",{service:t})}export{s as a,c as b,n as c,o as g,i as r};

@@ -279,7 +279,7 @@ class SubscriptionController extends Controller
 
             if ($refundAmount > 0) {
                 $fresh->increment('balance', $refundAmount);
-                Transaction::create([
+                $selfRefundTxn = Transaction::create([
                     'customer_id' => $fresh->id,
                     'type' => Transaction::TYPE_REFUND,
                     'amount' => $refundAmount,
@@ -292,6 +292,36 @@ class SubscriptionController extends Controller
                         $sub->id, $originalPrice, $releaseFee, $data['reason'] ?? ''
                     ),
                     'operated_by' => null,
+                ]);
+            }
+
+            // 业绩流水账：自助退订整单冲销（净归零）；老单（无账目）按退款金额冲
+            $ledgerSums = \Illuminate\Support\Facades\DB::table('performance_entries')
+                ->where('subscription_id', $sub->id)
+                ->selectRaw('COALESCE(SUM(revenue),0) r, COALESCE(SUM(sales_cost),0) sc,
+                    COALESCE(SUM(hard_cost_ip),0) hi, COALESCE(SUM(hard_cost_fwd),0) hf, COALESCE(SUM(months),0) m')
+                ->first();
+            if (((float) $ledgerSums->r) != 0 || ((float) $ledgerSums->sc) != 0) {
+                \App\Services\PerformanceLedger::record([
+                    'event_type' => \App\Services\PerformanceLedger::EVENT_REFUND,
+                    'customer_id' => \App\Services\PerformanceLedger::attributionCustomerId($sub),
+                    'subscription_id' => $sub->id,
+                    'transaction_id' => $selfRefundTxn->id ?? null,
+                    'revenue' => -(float) $ledgerSums->r,
+                    'sales_cost' => -(float) $ledgerSums->sc,
+                    'hard_cost_ip' => -(float) $ledgerSums->hi,
+                    'hard_cost_fwd' => -(float) $ledgerSums->hf,
+                    'months' => -(float) $ledgerSums->m,
+                    'meta' => ['mode' => 'self_refund_full_reversal', 'refund_amount' => $refundAmount],
+                ]);
+            } elseif ($refundAmount > 0) {
+                \App\Services\PerformanceLedger::record([
+                    'event_type' => \App\Services\PerformanceLedger::EVENT_REFUND,
+                    'customer_id' => \App\Services\PerformanceLedger::attributionCustomerId($sub),
+                    'subscription_id' => $sub->id,
+                    'transaction_id' => $selfRefundTxn->id ?? null,
+                    'revenue' => -$refundAmount,
+                    'meta' => ['mode' => 'legacy_sub'],
                 ]);
             }
 

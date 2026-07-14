@@ -1,1 +1,0 @@
-import{z as t}from"./index-DWyamWS5.js";function s(){return t.get("/roles")}function n(e){return t.get(`/roles/${e}`)}function l(e){return t.post("/roles",e)}function u(e,r){return t.put(`/roles/${e}`,r)}function a(e){return t.delete(`/roles/${e}`)}function i(){return t.get("/roles/all-permissions")}export{i as a,n as b,l as c,a as d,s as g,u};

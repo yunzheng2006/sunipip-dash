@@ -1033,7 +1033,7 @@ class SubscriptionController extends Controller
                 if ($customer) {
                     $balanceBefore = $customer->balance;
                     $customer->increment('balance', $refundAmount);
-                    Transaction::create([
+                    $refundTxn = Transaction::create([
                         'customer_id' => $customer->id,
                         'type' => Transaction::TYPE_REFUND,
                         'amount' => $refundAmount,
@@ -1045,6 +1045,39 @@ class SubscriptionController extends Controller
                         'operated_by' => $userId,
                     ]);
                 }
+            }
+
+            // 业绩流水账：退订冲销。
+            // 取消业绩（reverse_commission）→ 负向冲掉该订阅全部已记账目（净归零）；
+            // 保留业绩 → 只冲退款金额本身。订阅无账目（切换前的老单）时按退款金额冲。
+            $ledgerSums = DB::table('performance_entries')
+                ->where('subscription_id', $subscription->id)
+                ->selectRaw('COALESCE(SUM(revenue),0) r, COALESCE(SUM(commission),0) c, COALESCE(SUM(sales_cost),0) sc,
+                    COALESCE(SUM(hard_cost_ip),0) hi, COALESCE(SUM(hard_cost_fwd),0) hf, COALESCE(SUM(months),0) m')
+                ->first();
+            $hasLedger = ((float) $ledgerSums->r) != 0 || ((float) $ledgerSums->sc) != 0;
+            if ($reverseCommission && $hasLedger) {
+                \App\Services\PerformanceLedger::record([
+                    'event_type' => \App\Services\PerformanceLedger::EVENT_REFUND,
+                    'customer_id' => \App\Services\PerformanceLedger::attributionCustomerId($subscription),
+                    'subscription_id' => $subscription->id,
+                    'transaction_id' => $refundTxn->id ?? null,
+                    'revenue' => -(float) $ledgerSums->r,
+                    'sales_cost' => -(float) $ledgerSums->sc,
+                    'hard_cost_ip' => -(float) $ledgerSums->hi,
+                    'hard_cost_fwd' => -(float) $ledgerSums->hf,
+                    'months' => -(float) $ledgerSums->m,
+                    'meta' => ['mode' => 'full_reversal', 'refund_amount' => $refundAmount],
+                ]);
+            } elseif ($refundAmount > 0) {
+                \App\Services\PerformanceLedger::record([
+                    'event_type' => \App\Services\PerformanceLedger::EVENT_REFUND,
+                    'customer_id' => \App\Services\PerformanceLedger::attributionCustomerId($subscription),
+                    'subscription_id' => $subscription->id,
+                    'transaction_id' => $refundTxn->id ?? null,
+                    'revenue' => -$refundAmount,
+                    'meta' => ['mode' => $hasLedger ? 'keep_performance' : 'legacy_sub'],
+                ]);
             }
 
             $ipStillAssigned = $proxyIp && (int) $proxyIp->assigned_customer_id === (int) $subscription->customer_id;
@@ -1185,7 +1218,7 @@ class SubscriptionController extends Controller
             $balanceBefore = (float) $customer->balance;
             $customer->increment('balance', $refundAmount);
 
-            Transaction::create([
+            $partialRefundTxn = Transaction::create([
                 'customer_id' => $customer->id,
                 'type' => Transaction::TYPE_REFUND,
                 'amount' => $refundAmount,
@@ -1195,6 +1228,27 @@ class SubscriptionController extends Controller
                 'related_id' => $subscription->id,
                 'description' => "部分退订 #{$subscription->id}：退还{$refundableMonths}个月 ¥{$refundAmount} ({$reason})",
                 'operated_by' => $userId,
+            ]);
+
+            // 业绩流水账：按退还月数负向冲减（收入冲退款额，成本冲未使用月份）
+            $pFwdRule = \App\Models\ForwardRule::with('forwardPlan:id,cost_price,hard_cost_price')
+                ->where('subscription_id', $subscription->id)
+                ->where('status', 'active')->first();
+            $pFwdCostM = (float) ($pFwdRule?->forwardPlan?->cost_price ?? 0);
+            $pFwdHardM = (float) ($pFwdRule?->forwardPlan?->hard_cost_price ?? $pFwdRule?->forwardPlan?->cost_price ?? 0);
+            $pIpSalesM = (float) ($subscription->sales_cost ?? 0);
+            $pIpHardM = (float) ($subscription->hard_cost ?: $pIpSalesM);
+            \App\Services\PerformanceLedger::record([
+                'event_type' => \App\Services\PerformanceLedger::EVENT_REFUND,
+                'customer_id' => \App\Services\PerformanceLedger::attributionCustomerId($subscription),
+                'subscription_id' => $subscription->id,
+                'transaction_id' => $partialRefundTxn->id,
+                'revenue' => -$refundAmount,
+                'sales_cost' => -(($pIpSalesM + $pFwdCostM) * $refundableMonths),
+                'hard_cost_ip' => -($pIpHardM * $refundableMonths),
+                'hard_cost_fwd' => -($pFwdHardM * $refundableMonths),
+                'months' => -$refundableMonths,
+                'meta' => ['mode' => 'partial_refund'],
             ]);
 
             // 2. 缩短订阅到当月月底，price/duration 同步扣减已退部分
@@ -1400,7 +1454,7 @@ class SubscriptionController extends Controller
                 $balanceBefore = $customer->balance;
                 $customer->decrement('balance', $totalCharge);
 
-                Transaction::create([
+                $convertTxn = Transaction::create([
                     'customer_id' => $customer->id,
                     'type' => Transaction::TYPE_DEDUCTION,
                     'amount' => -$totalCharge,
@@ -1410,6 +1464,28 @@ class SubscriptionController extends Controller
                     'related_id' => $subscription->id,
                     'description' => "测试转正 #{$subscription->id}（{$duration}个月 × ¥{$price}/月）",
                     'operated_by' => $request->user()->id,
+                ]);
+
+                // 业绩流水账：转正行（IP + 当前中转成本 × 转正月数）
+                $cMonths = max(\App\Support\DurationHelper::toMonths($duration, $unit), 1);
+                $cFwdRule = ForwardRule::with('forwardPlan:id,cost_price,hard_cost_price')
+                    ->where('subscription_id', $subscription->id)
+                    ->where('status', 'active')->first();
+                $cFwdCostM = (float) ($cFwdRule?->forwardPlan?->cost_price ?? 0);
+                $cFwdHardM = (float) ($cFwdRule?->forwardPlan?->hard_cost_price ?? $cFwdRule?->forwardPlan?->cost_price ?? 0);
+                $cIpSalesM = (float) ($subscription->fresh()->sales_cost ?? 0);
+                $cIpHardM = (float) ($subscription->fresh()->hard_cost ?: $cIpSalesM);
+                \App\Services\PerformanceLedger::record([
+                    'event_type' => \App\Services\PerformanceLedger::EVENT_CONVERT,
+                    'customer_id' => \App\Services\PerformanceLedger::attributionCustomerId($subscription),
+                    'subscription_id' => $subscription->id,
+                    'forward_rule_id' => $cFwdRule?->id,
+                    'transaction_id' => $convertTxn->id,
+                    'revenue' => $totalCharge,
+                    'sales_cost' => ($cIpSalesM + $cFwdCostM) * $cMonths,
+                    'hard_cost_ip' => $cIpHardM * $cMonths,
+                    'hard_cost_fwd' => $cFwdHardM * $cMonths,
+                    'months' => $cMonths,
                 ]);
 
                 try {
@@ -1530,7 +1606,7 @@ class SubscriptionController extends Controller
                 $balanceBefore = $customer->balance;
                 $customer->increment('balance', $refundAmount);
 
-                Transaction::create([
+                $refundTxn = Transaction::create([
                     'customer_id' => $customer->id,
                     'type' => Transaction::TYPE_REFUND,
                     'amount' => $refundAmount,
@@ -1540,6 +1616,25 @@ class SubscriptionController extends Controller
                     'related_id' => $subscription->id,
                     'description' => "降级退差价 #{$subscription->id}: 中转费 ¥{$forwardFee}/月, 剩余{$remainingDays}天",
                     'operated_by' => $userId,
+                ]);
+
+                // 业绩流水账：负数行冲减（退多少钱冲多少收入，中转成本按退款比例同步冲减）
+                // 不退款的降级不写行——成本、业绩都不动（运营确认的口径）
+                $refundMonths = $forwardFee > 0 ? round($refundAmount / $forwardFee, 2) : 0;
+                $planCost = $forwardRule->forward_plan_id
+                    ? DB::table('forward_plans')->where('id', $forwardRule->forward_plan_id)
+                        ->first(['cost_price', 'hard_cost_price'])
+                    : null;
+                \App\Services\PerformanceLedger::record([
+                    'event_type' => \App\Services\PerformanceLedger::EVENT_DOWNGRADE_REFUND,
+                    'customer_id' => \App\Services\PerformanceLedger::attributionCustomerId($subscription),
+                    'subscription_id' => $subscription->id,
+                    'forward_rule_id' => $forwardRule->id,
+                    'transaction_id' => $refundTxn->id,
+                    'revenue' => -$refundAmount,
+                    'sales_cost' => -((float) ($planCost->cost_price ?? 0) * $refundMonths),
+                    'hard_cost_fwd' => -((float) ($planCost->hard_cost_price ?? $planCost->cost_price ?? 0) * $refundMonths),
+                    'months' => -$refundMonths,
                 ]);
             }
         });
@@ -1790,6 +1885,21 @@ class SubscriptionController extends Controller
                     ]);
 
                     $allSubscriptions[] = $subscription;
+
+                    // 业绩流水账：余额扣款才记购买行
+                    if ($paymentMethod === 'balance') {
+                        \App\Services\PerformanceLedger::record([
+                            'event_type' => \App\Services\PerformanceLedger::EVENT_PURCHASE,
+                            'customer_id' => $customerId,
+                            'subscription_id' => $subscription->id,
+                            'transaction_id' => $purchaseTxn->id ?? null,
+                            'revenue' => (float) $totalPrice,
+                            'sales_cost' => (float) ($salesCost ?? 0) * max($durationMonths, 1),
+                            'hard_cost_ip' => (float) ($hardCost ?? 0) * max($durationMonths, 1),
+                            'months' => max($durationMonths, 1),
+                            'meta' => ['source' => 'own_inventory', 'order_no' => $order->order_no],
+                        ]);
+                    }
 
                     // Create assignment log
                     IpAssignmentLog::create([

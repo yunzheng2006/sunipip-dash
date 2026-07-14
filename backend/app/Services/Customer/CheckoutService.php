@@ -735,18 +735,34 @@ class CheckoutService
     }
 
     /**
-     * 从允许的 CIDR 列表中选一个库存最多的，将订单数量全部分配给它。
-     * Spark 要求 cidrBlocks 的 count 总和 == 订单数量。
+     * 从允许的 CIDR 列表中按库存从多到少拆分订单数量。
+     * Spark 要求 cidrBlocks 的 count 总和 == 订单数量，且每段 count 不能超过该段库存
+     * （此前把整单塞进单一段：数量 > 单段库存时上游必报 stock is not enough）。
+     *
+     * @throws ValidationException 可用段库存合计不足时
      */
     private static function pickCidrForOrder(array $cidrBlocks, int $quantity): array
     {
         usort($cidrBlocks, fn($a, $b) => ($b['count'] ?? 0) <=> ($a['count'] ?? 0));
 
-        $best = $cidrBlocks[0] ?? null;
-        if (!$best) {
-            return [];
+        $result = [];
+        $remaining = $quantity;
+        foreach ($cidrBlocks as $block) {
+            if ($remaining <= 0) break;
+            $take = min($remaining, (int) ($block['count'] ?? 0));
+            if ($take <= 0 || empty($block['cidr'])) continue;
+            $result[] = ['cidr' => $block['cidr'], 'count' => $take];
+            $remaining -= $take;
         }
 
-        return [['cidr' => $best['cidr'], 'count' => $quantity]];
+        if ($remaining > 0) {
+            // 不能返回空数组回退成"不限段"下单——那会绕过产品屏蔽名单
+            $available = $quantity - $remaining;
+            throw ValidationException::withMessages([
+                'items' => "该产品可售 IP 段库存不足：需要 {$quantity} 条，当前可用 {$available} 条，请减少数量后重试",
+            ]);
+        }
+
+        return $result;
     }
 }
