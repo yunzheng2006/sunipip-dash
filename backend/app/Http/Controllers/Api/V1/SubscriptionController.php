@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Api\V1;
 
 use App\Http\Controllers\Controller;
 use App\Models\Customer;
+use App\Models\ForwardRule;
 use App\Models\IpAssignmentLog;
 use App\Models\PricingRule;
 use App\Models\ProvisionOrder;
@@ -1998,6 +1999,13 @@ class SubscriptionController extends Controller
             return $this->error('只能划转状态为激活的订阅', 422);
         }
 
+        // 目标客户付费只允许余额扣款：线下付款在系统内没有资金流水，
+        // 业绩/成本无法跟随（真实事故：build→罗罗洛 线下划转导致两边账目分裂）。
+        // 线下收款的正确流程：先给目标客户充值入账，再划转扣余额。
+        if (!empty($data['charge_target']) && ($data['charge_method'] ?? 'balance') !== 'balance') {
+            return $this->error('目标客户付费仅支持余额扣款。如客户线下付款，请先充值入账再划转', 422);
+        }
+
         $sourceCustomerId = $subscription->customer_id;
         $targetCustomerId = (int) $data['target_customer_id'];
 
@@ -2019,11 +2027,15 @@ class SubscriptionController extends Controller
 
         DB::transaction(function () use ($subscription, $sourceCustomerId, $targetCustomerId, $chargeTarget, $chargeMethod, $refundSource, $price, $userId, $proxyIp, $data) {
             // 1. 转移订阅
+            // transferred_from 决定业绩/成本归属：只有目标客户【真实余额扣款】时
+            // 归属才跟着走；线下付款和免费划转在系统内都没有资金流水，成本必须
+            // 留在原客户（钱在谁那业绩成本就在谁那——真实事故：build 被扣 ¥115
+            // 后订阅线下划转给罗罗洛，消费留在 build、成本跑到罗罗洛，两边都不对账）
             $transferUpdate = [
                 'customer_id' => $targetCustomerId,
             ];
-            if ($chargeTarget) {
-                $transferUpdate['balance_deducted'] = $chargeMethod === 'balance';
+            if ($chargeTarget && $chargeMethod === 'balance') {
+                $transferUpdate['balance_deducted'] = true;
                 $transferUpdate['transferred_from_customer_id'] = null;
             } else {
                 $transferUpdate['transferred_from_customer_id'] = $sourceCustomerId;
@@ -2091,6 +2103,36 @@ class SubscriptionController extends Controller
                         'operated_by' => $userId,
                     ]);
                 }
+
+                // 业绩流水账：余额划转 = 资产易主。原客户负向冲出该订阅的存量账目
+                //（退款时连收入一起冲，不退款只冲成本），目标客户按价格+存量成本正向入账
+                $tSums = DB::table('performance_entries')
+                    ->where('subscription_id', $subscription->id)
+                    ->selectRaw('COALESCE(SUM(revenue),0) r, COALESCE(SUM(sales_cost),0) sc,
+                        COALESCE(SUM(hard_cost_ip),0) hi, COALESCE(SUM(hard_cost_fwd),0) hf, COALESCE(SUM(months),0) m')
+                    ->first();
+                \App\Services\PerformanceLedger::record([
+                    'event_type' => 'transfer_out',
+                    'customer_id' => $sourceCustomerId,
+                    'subscription_id' => $subscription->id,
+                    'revenue' => $refundSource ? -(float) $tSums->r : 0,
+                    'sales_cost' => -(float) $tSums->sc,
+                    'hard_cost_ip' => -(float) $tSums->hi,
+                    'hard_cost_fwd' => -(float) $tSums->hf,
+                    'months' => -(float) $tSums->m,
+                    'meta' => ['target_customer_id' => $targetCustomerId, 'refund_source' => $refundSource],
+                ]);
+                \App\Services\PerformanceLedger::record([
+                    'event_type' => 'transfer_in',
+                    'customer_id' => $targetCustomerId,
+                    'subscription_id' => $subscription->id,
+                    'revenue' => $price,
+                    'sales_cost' => (float) $tSums->sc,
+                    'hard_cost_ip' => (float) $tSums->hi,
+                    'hard_cost_fwd' => (float) $tSums->hf,
+                    'months' => (float) $tSums->m,
+                    'meta' => ['source_customer_id' => $sourceCustomerId],
+                ]);
             }
 
             // 5. 业绩处理：回收原客户返佣+销售佣金

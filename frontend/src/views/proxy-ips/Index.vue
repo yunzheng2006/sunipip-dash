@@ -228,7 +228,7 @@
             :placeholder="batchForm.mode === 'single_region'
               ? '一行一个: ip:port:user:pass\n\n110.44.171.162:9553:Y4M4V7V0h9J3:f9G2k3O1o7L5'
               : '一行一个: ip:port:user:pass:CC\n\n110.44.171.162:9553:Y4M4V7V0h9J3:f9G2k3O1o7L5:BR\n103.87.29.55:8080:admin:pass123:US'" />
-          <div class="hint">每行一个，最多 500 条。重复 IP:端口 自动跳过。</div>
+          <div class="hint">每行一个，最多 500 条。地址+端口+账号+密码完全相同才算重复（自动跳过）；密码不同视为独立资产。</div>
         </el-form-item>
       </el-form>
       <template #footer>

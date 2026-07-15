@@ -288,12 +288,17 @@ class SalesStatsNewController extends Controller
 
         // ── 3. 消费：时段内余额支出 - 退款 ──
         // 只要交易 amount<0 就是实际扣了余额，不再依赖 balance_deducted 标记
+        // 退订剔除的边界：批量开通是一笔交易挂在首条订阅上（如 ¥160 开 2 条），
+        // 首条退订时若整笔剔除，会把存活订阅的那份钱一起吞掉（真实案例：洪子
+        // 7/13 少算 ¥80）。因此金额明显大于关联订阅 price 的"批量交易"不剔除，
+        // 其退款也保留冲减，让批量对（+160 − 80）自然净出存活部分。
         $spendingSubFilter = function ($q) {
             $q->whereNull('subscriptions.id')
               ->orWhere(function ($q2) {
                   $q2->where('subscriptions.status', '!=', 'refunded')
                      ->orWhere('subscriptions.keep_performance', true);
-              });
+              })
+              ->orWhereRaw('ABS(transactions.amount) > subscriptions.price + 0.01');
         };
         $spendingData = [];
         $spendingRows = DB::table('transactions')
@@ -314,7 +319,24 @@ class SalesStatsNewController extends Controller
             $spendingData[$row->customer_id] = (float) $row->total;
         }
 
-        // 3b. 退款扣减（同样的过滤条件）
+        // 3b. 退款扣减。保留业绩（keep_performance）的退订属于人工干预：业绩/成本完全保留，
+        // 退款只是资金操作，不冲减业绩。未保留业绩的退订，其退款仅当无 1:1 对应支出交易时
+        // 才冲减（批量交易场景，与上面的批量支出配对）；有 1:1 支出的两侧同时剔除，净零。
+        $refundSubFilter = function ($q) {
+            $q->whereNull('subscriptions.id')
+              ->orWhere('subscriptions.status', '!=', 'refunded')
+              ->orWhere(function ($q2) {
+                  $q2->where('subscriptions.keep_performance', false)
+                     ->whereRaw("NOT EXISTS (
+                            SELECT 1 FROM transactions tp
+                            WHERE tp.related_id = subscriptions.id
+                              AND tp.related_type = 'App\\\\Models\\\\Subscription'
+                              AND tp.amount < 0
+                              AND tp.type IN ('purchase', 'deduction', 'renew')
+                              AND ABS(tp.amount) <= subscriptions.price + 0.01
+                        )");
+              });
+        };
         $refundRows = DB::table('transactions')
             ->leftJoin('subscriptions', function ($join) {
                 $join->on('transactions.related_id', '=', 'subscriptions.id')
@@ -323,7 +345,7 @@ class SalesStatsNewController extends Controller
             ->whereIn('transactions.customer_id', $customerIds)
             ->whereIn('transactions.type', [Transaction::TYPE_REFUND, Transaction::TYPE_GATEWAY_REFUND])
             ->where('transactions.amount', '>', 0)
-            ->where($spendingSubFilter)
+            ->where($refundSubFilter)
             ->where('transactions.created_at', '>=', $periodStart)
             ->where('transactions.created_at', '<=', $periodEnd)
             ->select('transactions.customer_id', DB::raw('SUM(transactions.amount) as total'))
@@ -1024,15 +1046,35 @@ class SalesStatsNewController extends Controller
             ->whereBetween('t.created_at', [$periodStart, $periodEnd])
             ->orderBy('t.id')
             ->get(['t.id', 't.type', 't.amount', 't.balance_after', 't.description', 't.created_at',
-                   's.id as sub_id', 's.status as sub_status', 's.keep_performance']);
-        $transactions = $txnRows->map(function ($t) {
+                   's.id as sub_id', 's.status as sub_status', 's.keep_performance', 's.price as sub_price']);
+        // 退订订阅是否存在 1:1 支出交易（批量交易剔除边界，与 index() 的 3/3b 同口径）
+        $refundedSubIds = $txnRows->where('sub_status', 'refunded')->pluck('sub_id')->filter()->unique()->values();
+        $oneToOnePaid = [];
+        if ($refundedSubIds->isNotEmpty()) {
+            $oneToOnePaid = DB::table('transactions as tp')
+                ->join('subscriptions as s2', 's2.id', '=', 'tp.related_id')
+                ->where('tp.related_type', 'App\\Models\\Subscription')
+                ->whereIn('tp.related_id', $refundedSubIds)
+                ->whereIn('tp.type', ['purchase', 'deduction', 'renew'])
+                ->where('tp.amount', '<', 0)
+                ->whereRaw('ABS(tp.amount) <= s2.price + 0.01')
+                ->pluck('tp.related_id')->flip()->all();
+        }
+        $transactions = $txnRows->map(function ($t) use ($oneToOnePaid) {
             $subOk = !$t->sub_id || $t->sub_status !== 'refunded' || $t->keep_performance;
             $effect = 0.0;
-            if ((float) $t->amount < 0 && !in_array($t->type, Transaction::SPENDING_EXCLUDE_TYPES) && $subOk) {
-                $effect = abs((float) $t->amount); // 计入消费
+            if ((float) $t->amount < 0 && !in_array($t->type, Transaction::SPENDING_EXCLUDE_TYPES)) {
+                // 批量交易（金额>关联订阅price）即使订阅已退订也计入，与 3-过滤一致
+                if ($subOk || abs((float) $t->amount) > (float) $t->sub_price + 0.01) {
+                    $effect = abs((float) $t->amount); // 计入消费
+                }
             } elseif (in_array($t->type, [Transaction::TYPE_REFUND, Transaction::TYPE_GATEWAY_REFUND])
-                && (float) $t->amount > 0 && $subOk) {
-                $effect = -(float) $t->amount; // 退款冲减消费
+                && (float) $t->amount > 0) {
+                // 保留业绩的退订退款不冲减（人工干预，业绩完全保留），与 index() 3b 同口径
+                $keptRefund = $t->sub_id && $t->sub_status === 'refunded' && $t->keep_performance;
+                if (!$keptRefund && ($subOk || !isset($oneToOnePaid[$t->sub_id]))) {
+                    $effect = -(float) $t->amount; // 退款冲减消费
+                }
             }
             return [
                 'id' => $t->id, 'type' => $t->type, 'amount' => (float) $t->amount,

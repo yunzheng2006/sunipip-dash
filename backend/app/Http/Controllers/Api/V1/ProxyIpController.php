@@ -206,8 +206,13 @@ class ProxyIpController extends Controller
                 $countryName = $data['country_name'] ?? $codeToName[strtoupper($countryCode)] ?? $assetGroup?->country_name ?? '';
             }
 
-            // 重复检测（含软删除记录）
-            $existingIp = ProxyIp::withTrashed()->where('ip_address', $ip)->where('port', $port)->first();
+            // 重复检测（含软删除记录）：同地址+端口但账号/密码不同的是独立资产，只有四元组全同才算重复
+            $existingIp = ProxyIp::withTrashed()
+                ->where('ip_address', $ip)
+                ->where('port', $port)
+                ->whereRaw("COALESCE(auth_username, '') = ?", [$username ?? ''])
+                ->whereRaw("COALESCE(auth_password, '') = ?", [$password ?? ''])
+                ->first();
             if ($existingIp) {
                 if ($existingIp->trashed()) {
                     \App\Models\Subscription::where('proxy_ip_id', $existingIp->id)->delete();
@@ -222,7 +227,7 @@ class ProxyIpController extends Controller
                         $skipped++;
                         continue;
                     }
-                    // 无活跃订阅：更新凭证和信息（可能密码变了、换了客户）
+                    // 无活跃订阅：重复导入同一资产，刷新信息并重置为可用
                     $existingIp->update([
                         'asset_group_id'      => $data['asset_group_id'],
                         'ip_group_id'         => $data['ip_group_id'] ?? null,
@@ -721,8 +726,13 @@ class ProxyIpController extends Controller
                 continue;
             }
 
-            // 检查重复（含软删除记录）
-            $existingIp = ProxyIp::withTrashed()->where('ip_address', $ipAddress)->where('port', $port)->first();
+            // 检查重复（含软删除记录）：同地址+端口但账号/密码不同的是独立资产，只有四元组全同才算重复
+            $existingIp = ProxyIp::withTrashed()
+                ->where('ip_address', $ipAddress)
+                ->where('port', $port)
+                ->whereRaw("COALESCE(auth_username, '') = ?", [$authUser])
+                ->whereRaw("COALESCE(auth_password, '') = ?", [$authPass])
+                ->first();
             if ($existingIp) {
                 if ($existingIp->trashed()) {
                     \App\Models\Subscription::where('proxy_ip_id', $existingIp->id)->delete();
@@ -739,7 +749,7 @@ class ProxyIpController extends Controller
                         $errors[] = ['row' => $total + 1, 'message' => "IP {$ipAddress}:{$port} 有活跃订阅，无法覆盖"];
                         continue;
                     }
-                    // 无活跃订阅：更新凭证（密码可能变了）
+                    // 无活跃订阅：重复导入同一资产，刷新为可用
                     $existingIp->update([
                         'socks5_info'    => implode(':', array_filter([$ipAddress, $port, $authUser, $authPass])),
                         'auth_username'  => $authUser,

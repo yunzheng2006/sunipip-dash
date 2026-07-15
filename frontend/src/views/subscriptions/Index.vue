@@ -515,13 +515,10 @@
         <el-form-item v-if="transferForm.charge_target" label="付费方式">
           <el-radio-group v-model="transferForm.charge_method">
             <el-radio value="balance">立即扣余额</el-radio>
-            <el-radio value="offline">线下已付款（不扣余额）</el-radio>
           </el-radio-group>
-          <div v-if="transferForm.charge_method === 'balance'" style="font-size: 12px; color: #909399; margin-top: 4px">
-            将从目标客户余额扣除 ¥{{ Number(transferTarget?.price || 0).toFixed(2) }}
-          </div>
-          <div v-else style="font-size: 12px; color: #909399; margin-top: 4px">
-            目标客户已线下付款，系统仅划转订阅不扣余额
+          <div style="font-size: 12px; color: #909399; margin-top: 4px">
+            将从目标客户余额扣除 ¥{{ Number(transferTarget?.price || 0).toFixed(2) }}。
+            如客户线下付款，请先在客户详情充值入账再划转，保证资金有流水可追。
           </div>
         </el-form-item>
         <el-form-item v-if="transferForm.charge_target && transferForm.charge_method === 'balance'" label="退还原客户">

@@ -59,6 +59,24 @@ class SparkProvisionService
     {
         $reqOrderNo = SparkOrder::generateReqOrderNo();
 
+        // 产品屏蔽段强制执行（所有开通路径的统一闸口）：
+        // "随机"下单（未显式选段）时自动限定为可售段，否则上游可能分配到屏蔽段；
+        // 显式选段则校验不在屏蔽名单内。写入 $params 使 request_data 留痕。
+        $blockedCidrs = \App\Models\SparkProductBlock::blockedCidrsByProduct()[$params['product_id']] ?? [];
+        if (!empty($blockedCidrs)) {
+            if (empty($params['cidr_blocks'])) {
+                $params['cidr_blocks'] = \App\Models\SparkProductBlock::allocateAllowedCidrs(
+                    $params['product_id'], (int) $params['quantity']
+                );
+            } else {
+                foreach ($params['cidr_blocks'] as $cb) {
+                    if (in_array($cb['cidr'] ?? '', $blockedCidrs, true)) {
+                        throw new \Exception("IP 段 {$cb['cidr']} 已被屏蔽，不能用于开通");
+                    }
+                }
+            }
+        }
+
         // 上游只创建 1 个月，后续由 spark:upstream-renew cron 按月滚动续费
         $sparkDuration = 1;
         $sparkUnit = 3; // 月
